@@ -78,6 +78,9 @@ output/
 _research/
 *.zip
 
+# prior-art evidence (local only)
+evidence/
+
 # pi internal (runtime artifacts)
 .pi-lens/
 pi-session-*.html
