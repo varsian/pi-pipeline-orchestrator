@@ -1,0 +1,32 @@
+{
+  "name": "pi-pipeline-orchestrator",
+  "version": "1.0.0",
+  "description": "声明式流水线编排框架 for pi 编程助手 — JSON 定义多阶段状态机，自动调度子 Agent 执行，支持并行、重试、LLM 决策点、断点续跑",
+  "keywords": [
+    "pi",
+    "pipeline",
+    "orchestrator",
+    "agent",
+    "workflow",
+    "state-machine",
+    "ai-agent",
+    "multi-agent",
+    "typescript"
+  ],
+  "author": "varsian",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/varsian/pi-pipeline-orchestrator"
+  },
+  "homepage": "https://github.com/varsian/pi-pipeline-orchestrator#readme",
+  "bugs": {
+    "url": "https://github.com/varsian/pi-pipeline-orchestrator/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1"
+  }
+}

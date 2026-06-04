@@ -1,0 +1,88 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Linux
+*~
+.directory
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-*
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.python-version
+.venv/
+venv/
+env/
+
+# Environment & Secrets
+.env
+.env.*
+*.local
+
+# Logs
+*.log
+
+# Temporary / Cache
+*.tmp
+*.temp
+.cache/
+.tmp/
+
+# Build output
+out/
+output/
+_research/
+*.zip
+
+# pi internal (runtime artifacts)
+.pi-lens/
+pi-session-*.html
+
+# pi generated (installed by pipeline-setup skill)
+.pi/agents/
+.pi/pipelines/
+.pi/extensions/

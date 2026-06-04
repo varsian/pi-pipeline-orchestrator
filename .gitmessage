@@ -1,0 +1,24 @@
+# <type>: <subject>
+# 
+# type 可选值:
+#   feat     新功能
+#   fix      修复 Bug
+#   docs     文档变更
+#   style    格式调整（不影响代码逻辑）
+#   refactor 重构（既非新功能也非修复）
+#   perf     性能优化
+#   test     测试相关
+#   chore    构建/工具/依赖变更
+#   revert   回退
+# 
+# subject 规范:
+#   - 使用中文或英文，首字母小写
+#   - 不加句号结尾
+#   - 不超过 50 个字符
+# 
+# body（可选）:
+#   - 详细描述变更原因和内容
+#   - 每行不超过 72 个字符
+# 
+# footer（可选）:
+#   - 关联 Issue: Refs #123

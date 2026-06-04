@@ -1,0 +1,8 @@
+{
+  "name": "pipeline-orchestrator",
+  "version": "1.0.0",
+  "description": "Pipeline orchestration framework for pi — standardized sub-agent execution with state machines, retry, and resume",
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
