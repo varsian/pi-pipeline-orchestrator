@@ -205,4 +205,4 @@ The codebase is small (8 source files) and structured for readability. If you ru
 
 ## License
 
-[Apache 2.0](LICENSE) © varsian
+[GNU AGPL v3](LICENSE) © varsian

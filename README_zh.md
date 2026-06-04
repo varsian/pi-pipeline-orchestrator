@@ -205,4 +205,4 @@ pipeline-orchestrator/
 
 ## 许可证
 
-[Apache 2.0](LICENSE) © varsian
+[GNU AGPL v3](LICENSE) © varsian
