@@ -1,7 +1,10 @@
 {
   "name": "pipeline-orchestrator",
-  "version": "1.0.0",
-  "description": "Pipeline orchestration framework for pi — standardized sub-agent execution with state machines, retry, and resume",
+  "version": "2.0.0",
+  "description": "Pipeline orchestration extension for omp — declarative multi-phase agent pipelines with state machines, retry, resume, and conditional routing",
+  "omp": {
+    "extensions": ["./index.ts"]
+  },
   "pi": {
     "extensions": ["./index.ts"]
   }

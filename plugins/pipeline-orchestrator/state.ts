@@ -1,7 +1,7 @@
 /**
- * Pipeline Orchestrator — state engine v3
+ * Pipeline Orchestrator — state engine v4 (omp)
  *
- * Persists pipeline state via pi.appendEntry().
+ * Persists pipeline state via pi.appendEntry() with memory:// backup.
  * Supports route-table transitions and context injection.
  */
 
@@ -9,9 +9,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
-	ChangeManifest,
 	EntityState,
-	MemoryStore,
 	PipelineDefinition,
 	PipelineRecord,
 	Route,
@@ -39,6 +37,7 @@ export function flattenVars(
 	}
 	return out;
 }
+
 /** Compute outputDir from pipeline definition + entity */
 function computeOutputDir(
 	record: PipelineRecord,
@@ -54,6 +53,14 @@ function computeOutputDir(
 	return dir;
 }
 
+/** Substitute variables in a string template */
+function substituteVars(template: string, vars: Record<string, string>): string {
+	let result = template;
+	for (const [k, v] of Object.entries(vars)) {
+		result = result.replace(new RegExp(`\\{${k}\\}`, "g"), v);
+	}
+	return result;
+}
 
 export function restoreFromEntries(
 	entries: Array<{ type: string; customType?: string; data?: unknown }>,
@@ -69,12 +76,12 @@ export function restoreFromEntries(
 	}
 }
 
-export function getAllPipelines(): PipelineRecord[] {
-	return Array.from(store.values());
-}
-
 export function getPipeline(pipelineId: string): PipelineRecord | undefined {
 	return store.get(pipelineId);
+}
+
+export function getAllPipelines(): PipelineRecord[] {
+	return Array.from(store.values());
 }
 
 /** Create a new pipeline run with full definition */
@@ -83,6 +90,7 @@ export function createPipeline(
 	pipelineId: string,
 	definition: PipelineDefinition,
 	entityIds: string[],
+	onPersist?: (record: PipelineRecord) => void,
 ): PipelineRecord {
 	const now = new Date().toISOString();
 	const entities: Record<string, EntityState> = {};
@@ -107,6 +115,7 @@ export function createPipeline(
 	};
 	store.set(pipelineId, record);
 	appendEntry(ENTRY_TYPE, record);
+	onPersist?.(record);
 	return record;
 }
 
@@ -115,6 +124,7 @@ export function updateEntity(
 	pipelineId: string,
 	entityId: string,
 	patch: Partial<EntityState>,
+	onPersist?: (record: PipelineRecord) => void,
 ): EntityState | null {
 	const record = store.get(pipelineId);
 	if (!record) return null;
@@ -129,6 +139,7 @@ export function updateEntity(
 	record.entities[entityId] = updated;
 	record.updatedAt = updated.updatedAt;
 	appendEntry(ENTRY_TYPE, record);
+	onPersist?.(record);
 	return updated;
 }
 
@@ -144,7 +155,7 @@ export function getActiveEntities(pipelineId: string): EntityState[] {
 export function getPhaseDef(pipelineId: string, phaseName: string) {
 	const record = store.get(pipelineId);
 	if (!record) return null;
-	const base = phaseName.split("|")[0]; // strip iter suffix
+	const base = phaseName.split("|")[0];
 	return record.definition.phases.find((p) => p.name === base) ?? null;
 }
 
@@ -198,11 +209,7 @@ export function resolveRouteNext(
 		};
 	}
 	if ("type" in transition && transition.type === "llm") {
-		return {
-			next: "__LLM__",
-			iter: false,
-			prompt: transition.prompt,
-		};
+		return { next: "__LLM__", iter: false, prompt: transition.prompt };
 	}
 	if ("type" in transition && transition.type === "conditional") {
 		return { next: "__COND__", iter: false };
@@ -215,16 +222,20 @@ export function resolveRouteNext(
 	if ("routes" in transition && transition.routes) {
 		for (const route of transition.routes) {
 			if (evaluateRouteCondition(route, context, record, entityId)) {
-				let next = route.next;
+				const next = route.next;
 				// Resolve special markers
 				if (next === "__NEXT__") {
-					next = idx < phases.length - 1 ? phases[idx + 1].name : "done";
-				} else if (next === "__LLM__") {
+					const linearNext = idx < phases.length - 1 ? phases[idx + 1].name : "done";
+					return { next: linearNext, iter: !!route.iter, loopId: route.loopId };
+				}
+				if (next === "__LLM__") {
 					return { next: "__LLM__", iter: !!route.iter, prompt: route.prompt, loopId: route.loopId };
-				} else if (next === "__COND__") {
-					return { next: "__COND__", iter: false };
-				} else if (next === "__MANUAL__") {
-					return { next: "__MANUAL__", iter: false };
+				}
+				if (next === "__COND__") {
+					return { next: "__COND__", iter: !!route.iter, prompt: route.prompt, loopId: route.loopId };
+				}
+				if (next === "__MANUAL__") {
+					return { next: "__MANUAL__", iter: false, prompt: route.prompt, loopId: route.loopId };
 				}
 				return { next, iter: !!route.iter, loopId: route.loopId };
 			}
@@ -252,27 +263,22 @@ function evaluateRouteCondition(
 	record: PipelineRecord,
 	entityId: string,
 ): boolean {
-	if (route.if === true) return true; // unconditional
+	if (route.if === true) return true;
 
 	const c = route.if as RouteCondition;
 
-	// exitCode check
 	if (c.exitCode !== undefined && c.exitCode !== ctx.exitCode) return false;
 
-	// validatePassed check
 	if (c.validatePassed !== undefined && c.validatePassed !== ctx.validatePassed)
 		return false;
 
-	// outputContains check
 	if (c.outputContains !== undefined && !ctx.agentOutput.includes(c.outputContains))
 		return false;
 
-	// outputRegex check
 	if (c.outputRegex) {
 		const re = new RegExp(c.outputRegex, "m");
 		const match = ctx.agentOutput.match(re);
 		if (!match) return false;
-		// Capture group comparison
 		if (c.captureOp && match[1]) {
 			const num = Number(match[1]);
 			if (Number.isNaN(num)) return false;
@@ -286,13 +292,9 @@ function evaluateRouteCondition(
 		}
 	}
 
-	// fileExists check (substitute variables)
 	if (c.fileExists) {
-		let fp = c.fileExists;
 		const vars = { ...flattenVars(record.definition.variables), ...ctx.extraVars, entity: entityId, outputDir: computeOutputDir(record, entityId, ctx.extraVars) };
-		for (const [k, v] of Object.entries(vars)) {
-			fp = fp.replace(new RegExp(`{${k}}`, "g"), v);
-		}
+		let fp = substituteVars(c.fileExists, vars);
 		try {
 			if (!fs.existsSync(fp)) return false;
 		} catch {
@@ -300,13 +302,9 @@ function evaluateRouteCondition(
 		}
 	}
 
-	// fileMinSize check
 	if (c.fileMinSize) {
-		let fp = c.fileMinSize.path;
 		const vars = { ...flattenVars(record.definition.variables), ...ctx.extraVars, entity: entityId, outputDir: computeOutputDir(record, entityId, ctx.extraVars) };
-		for (const [k, v] of Object.entries(vars)) {
-			fp = fp.replace(new RegExp(`{${k}}`, "g"), v);
-		}
+		let fp = substituteVars(c.fileMinSize.path, vars);
 		try {
 			const stat = fs.statSync(fp);
 			if (stat.size < c.fileMinSize.bytes) return false;
@@ -315,13 +313,9 @@ function evaluateRouteCondition(
 		}
 	}
 
-	// fileMaxSize check
 	if (c.fileMaxSize) {
-		let fp = c.fileMaxSize.path;
 		const vars = { ...flattenVars(record.definition.variables), ...ctx.extraVars, entity: entityId, outputDir: computeOutputDir(record, entityId, ctx.extraVars) };
-		for (const [k, v] of Object.entries(vars)) {
-			fp = fp.replace(new RegExp(`{${k}}`, "g"), v);
-		}
+		let fp = substituteVars(c.fileMaxSize.path, vars);
 		try {
 			const stat = fs.statSync(fp);
 			if (stat.size > c.fileMaxSize.bytes) return false;
@@ -330,13 +324,9 @@ function evaluateRouteCondition(
 		}
 	}
 
-	// bash check
 	if (c.bash) {
-		let cmd = c.bash;
 		const vars = { ...flattenVars(record.definition.variables), ...ctx.extraVars, entity: entityId, outputDir: computeOutputDir(record, entityId, ctx.extraVars) };
-		for (const [k, v] of Object.entries(vars)) {
-			cmd = cmd.replace(new RegExp(`{${k}}`, "g"), v);
-		}
+		let cmd = substituteVars(c.bash, vars);
 		try {
 			const r = spawnSync("bash", ["-c", cmd], { cwd: ctx.cwd, timeout: 30000 });
 			if (r.status !== 0) return false;
@@ -345,10 +335,8 @@ function evaluateRouteCondition(
 		}
 	}
 
-	// default (only if no other conditions were specified)
 	if (c.default === true) return true;
 
-	// If we got here, all specified conditions passed → match
 	return true;
 }
 
@@ -364,11 +352,10 @@ export function versionOutputFiles(
 		try {
 			if (!fs.existsSync(src)) continue;
 			const dest = path.join(outputDir, `${iter}-${filename}`);
-			// If dest already exists, remove first (overwrite latest)
 			if (fs.existsSync(dest)) fs.unlinkSync(dest);
 			fs.renameSync(src, dest);
 		} catch {
-			// Non-critical: versioning failure shouldn't block
+			/* non-critical */
 		}
 	}
 }
@@ -386,34 +373,26 @@ export function evaluateSkipIf(
 	if (!s) return false;
 
 	const vars = { ...pipelineVars, ...extraVars, entity: entityId, outputDir };
-	const sub = (str: string) => {
-		let result = str;
-		for (const [k, v] of Object.entries(vars)) {
-			result = result.replace(new RegExp(`{${k}}`, "g"), v);
-		}
-		return result;
-	};
 
 	if (s.fileExists) {
 		try {
-			if (!fs.existsSync(sub(s.fileExists))) return true;
+			if (fs.existsSync(substituteVars(s.fileExists, vars))) return true;
 		} catch {
-			return true;
+			return false; // can't verify → don't skip
 		}
 	}
 
 	if (s.fileNotExists) {
 		try {
-			if (!fs.existsSync(sub(s.fileNotExists))) return true;
+			if (!fs.existsSync(substituteVars(s.fileNotExists, vars))) return true;
 		} catch {
-			// file not accessible → assume it doesn't exist → skip
-			return true;
+			return true; // can't access → assume absent → skip
 		}
 	}
 
 	if (s.bash) {
 		try {
-			const r = spawnSync("bash", ["-c", sub(s.bash)], { cwd, timeout: 30000 });
+			const r = spawnSync("bash", ["-c", substituteVars(s.bash, vars)], { cwd, timeout: 30000 });
 			if (r.status === 0) return true;
 		} catch {
 			return true;
@@ -441,21 +420,16 @@ export function renderTaskTemplate(
 
 	let template = phase.taskTemplate.template;
 	const iter = entity.iter ?? 0;
-	const iterPrev = iter - 1;
-	const lastOutput = entity.lastOutput ?? "";
 
 	// Resolve output directory
 	let outputDir = "";
 	if (record.definition.outputDir) {
-		outputDir = record.definition.outputDir;
 		const tmpVars: Record<string, string> = {
 			...flattenVars(record.definition.variables),
 			...extraVars,
 			entity: entityId,
 		};
-		for (const [k, v] of Object.entries(tmpVars)) {
-			outputDir = outputDir.replace(new RegExp(`{${k}}`, "g"), v);
-		}
+		outputDir = substituteVars(record.definition.outputDir, tmpVars);
 	}
 
 	const vars: Record<string, string> = {
@@ -465,23 +439,20 @@ export function renderTaskTemplate(
 		entity: entityId,
 		pipelineId,
 		iter: String(iter),
-		iterPrev: String(iterPrev),
-		lastOutput,
+		iterPrev: String(iter - 1),
+		lastOutput: entity.lastOutput ?? "",
 	};
 
-	// Resolve {output:phaseName} or {output} (last phase) patterns
-	template = template.replace(/\{output:(\w+)\}/g, (_match, phaseName: string) => {
-		if (!outputDir) return `{output:${phaseName}}`;
-		return `${outputDir}/.agent-${phaseName}.log`;
+	// Resolve {output:phaseName} patterns
+	template = template.replace(/\{output:(\w+)\}/g, (_match, pn: string) => {
+		if (!outputDir) return `{output:${pn}}`;
+		return `${outputDir}/.agent-${pn}.log`;
 	});
 	template = template.replace(/\{output\}/g, () => {
 		if (!outputDir) return "{output}";
-		const lastPhase = entity.phase.split("|")[0];
-		return `${outputDir}/.agent-${lastPhase}.log`;
+		return `${outputDir}/.agent-${phaseName}.log`;
 	});
-	// {outputDir} = full output directory path
 	template = template.replace(/\{outputDir\}/g, outputDir || "{outputDir}");
-	// {outputDirFiles} = ls listing of output directory (fallback when no precise paths declared)
 	template = template.replace(/\{outputDirFiles\}/g, () => {
 		if (!outputDir) return "{outputDirFiles}";
 		try {
@@ -492,48 +463,33 @@ export function renderTaskTemplate(
 		}
 	});
 
-	// {lastPhaseSummary.verdict} and {lastPhaseSummary.keyFindings} — structured summary of previous phase
-	const phaseIdx = record.definition.phases.findIndex((p) => p.name === phaseName);
-	const lastPhase = phaseIdx > 0 ? record.definition.phases[phaseIdx - 1] : null;
-	const lastSummary = lastPhase ? entity.phaseSummaries?.[lastPhase.name] : null;
+	// {lastPhaseSummary.*} — from most recently executed phase (execution order, not definition order)
+	const lastExecuted = entity.lastExecutedPhase;
+	const lastSummary = lastExecuted ? entity.phaseSummaries?.[lastExecuted] : null;
 	template = template.replace(/\{lastPhaseSummary\.verdict\}/g, lastSummary?.verdict ?? "UNCLEAR");
 	template = template.replace(/\{lastPhaseSummary\.keyFindings\}/g, lastSummary?.keyFindings?.join("\n") ?? "");
 
-	for (const [key, value] of Object.entries(vars)) {
-		template = template.replace(new RegExp(`{${key}}`, "g"), value);
-	}
+	template = substituteVars(template, vars);
+
+	// ── Output contract: every agent MUST produce structured verdict ──
+	template +=
+		"\n\n---\n## OUTPUT REQUIRED\n" +
+		"At the end of your response, you MUST include exactly:\n\n" +
+		"VERDICT: <PASS | FAIL | UNCLEAR>\n" +
+		"SUMMARY: <one-line summary of what was done>\n" +
+		"FINDINGS:\n" +
+		"- <key finding>\n\n" +
+		"The pipeline routes based on this output. " +
+		"Omission will stall the workflow.";
 
 	return template;
 }
-
-// ── Manifest & Memory persistence (iterative lifecycle) ──
-
-const _manifestCache = new Map<string, ChangeManifest>();
-const _memoryCache = new Map<string, MemoryStore>();
-
-export function loadManifest(name: string): ChangeManifest | null {
-	return _manifestCache.get(name) ?? null;
-}
-
-export function saveManifest(name: string, manifest: ChangeManifest): void {
-	_manifestCache.set(name, manifest);
-}
-
-export function loadMemory(name: string): MemoryStore | null {
-	return _memoryCache.get(name) ?? null;
-}
-
-export function saveMemory(name: string, memory: MemoryStore): void {
-	_memoryCache.set(name, memory);
-}
-
 export function summarizePipeline(pipelineId: string): string {
 	const record = store.get(pipelineId);
 	if (!record) return "No pipeline found.";
 
-	const isIterative = record.definition.lifecycle === "iterative";
 	const lines: string[] = [
-		`Pipeline: ${pipelineId} (${record.definition.name})${isIterative ? "  iterative" : ""}`,
+		`Pipeline: ${pipelineId} (${record.definition.name})`,
 		`Entity type: ${record.definition.entityType}`,
 		`Phases: ${record.definition.phases.map((p) => p.name).join(" → ")}`,
 		`Started: ${record.startedAt}`,
@@ -542,11 +498,10 @@ export function summarizePipeline(pipelineId: string): string {
 
 	const ents = Object.values(record.entities);
 
-	// Per-entity status with loop counters (if iterative)
 	for (const e of ents) {
 		const icon = e.status === "completed" ? "✅" : e.status === "failed" ? "❌" : e.status === "skipped" ? "⏭️" : e.status === "running" ? "▶️" : "⏳";
 		let entityLine = `  ${icon} ${e.entityId}  ${e.phase}`;
-		if (isIterative && e.loopCounters && Object.keys(e.loopCounters).length > 0) {
+		if (e.loopCounters && Object.keys(e.loopCounters).length > 0) {
 			const max = record.definition.maxIterationsPerLoop ?? {};
 			const loopParts = Object.entries(e.loopCounters).map(([lid, count]) => {
 				const limit = max[lid] ?? record.definition.maxIterations ?? 5;
@@ -558,13 +513,12 @@ export function summarizePipeline(pipelineId: string): string {
 		lines.push(entityLine);
 	}
 
-	// Phase-level pass rates
 	lines.push("");
 	lines.push("Phase pass rates:");
 	for (const phase of record.definition.phases) {
-		const entered = ents.filter(e => e.phaseSummaries?.[phase.name]);
+		const entered = ents.filter((e) => e.phaseSummaries?.[phase.name]);
 		if (entered.length === 0) continue;
-		const passed = entered.filter(e => e.phaseSummaries?.[phase.name]?.verdict === "PASS");
+		const passed = entered.filter((e) => e.phaseSummaries?.[phase.name]?.verdict === "PASS");
 		const pct = Math.round((passed.length / entered.length) * 100);
 		const bar = "█".repeat(Math.round(pct / 10)) + "░".repeat(10 - Math.round(pct / 10));
 		lines.push(`  ${phase.name.padEnd(15)} ${bar} ${pct}% (${passed.length}/${entered.length})`);

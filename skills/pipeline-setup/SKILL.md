@@ -5,45 +5,30 @@ description: Read existing skill definitions (agents, pipeline structure) and au
 
 # Pipeline Setup
 
-读取任意 pipeline-compatible skill，自动提取 agent 和流水线结构，安装到项目 `.pi/` 下供 pipeline-orchestrator 插件使用。
+读取任意 pipeline-compatible skill，自动提取 agent 和流水线结构，安装到项目下供 pipeline-orchestrator 插件使用。
 
 ## Skill 发现
 
 用户说"配置 XXX 的流水线"时，按顺序查找 skill：
 
 1. `{cwd}/{name}/` — 当前目录
-2. `{cwd}/.pi/skills/{name}/` — 项目 skill
-3. `~/.pi/agent/skills/{name}/` — 全局 skill
+2. `{cwd}/.omp/skills/{name}/` 或 `{cwd}/.pi/skills/{name}/` — 项目 skill
+3. `~/.omp/agent/skills/{name}/` 或 `~/.pi/agent/skills/{name}/` — 全局 skill
 4. 都不存在 → 中断，提示 `No skill named "{name}" found.`
 
 找到后所有路径基于该 skill 目录解析。
 
 ## 做什么
 
-1. 安装 `{skill}/agents/*.md` → `.pi/agents/`
+1. 安装 `{skill}/agents/*.md` → `.pi/agents/`（也写入 `.omp/agents/` 如果存在）
 2. 解析 `{skill}/SKILL.md` 的流水线描述 → `.pi/pipelines/{name}.json`
 3. **交互式预览**：生成后不直接写入，先展示关键决策让用户确认或调整
-4. 输出配置摘要
+4. **验证**：保存后用 `/pipeline validate {name}` 检验配置正确性
+5. 输出配置摘要
 
-插件在 `session_start` 自动加载 `.pi/pipelines/*.json`，无需手动注册。
+## Lifecycle
 
-## Lifecycle 决策
-
-生成 pipeline JSON 前，先检测任务类型决定 `lifecycle` 字段：
-
-| lifecycle | 特征词（SKILL.md 中） | 附加文件 |
-|-----------|----------------------|---------|
-| `"oneshot"` | "生成"/"转换"/"一次性"/"报告"/"卡片"，明确 "Phase 1/2/3" 序列 | 无 |
-| `"iterative"` | "迭代"/"持续改进"/"修复"/"bug"/"issue"/"worktree"/"多轮" | manifest.json + memory.json |
-
-未命中时在预览中询问用户。
-
-**iterative 初始化**：额外创建两个空文件：
-
-```bash
-write .pi/pipelines/{name}.manifest.json  # { "rounds": [] }
-write .pi/pipelines/{name}.memory.json    # { "lessons": [] }
-```
+所有 pipeline 均为单次批处理模式。每个阶段按定义顺序执行，路由表控制循环与条件跳转。无需 manifest.json 或 memory.json 等附加文件。
 
 ---
 
@@ -311,7 +296,7 @@ Agent prompt 中 "输出到 XXX.md" → `versionOutputs: ["XXX.md"]`
 ```
 我推断了以下配置：
 
-  📋 任务类型: 短期 (lifecycle = "oneshot")
+  📋 任务类型: 单次批处理
   🔄 N 个阶段: phaseA → phaseB → ... → done
   🔁 phaseX 阶段: Agent 输出 PASS/NOT PASS 自动循环 (max 5 次)
   🛑 phaseY 阶段: 暂停等 LLM 决策
@@ -319,35 +304,11 @@ Agent prompt 中 "输出到 XXX.md" → `versionOutputs: ["XXX.md"]`
 确认生成？或需要调整：
   - 改 phaseY 为自动 (Agent 输出标记 → outputContains)
   - 调整循环上限
-  - 改为长期迭代模式
-  - 让我直接编辑 JSON
-```
-
-### iterative 预览模板
-
-```
-我推断了以下配置：
-
-  📋 任务类型: 长期迭代 (lifecycle = "iterative")
-     → 将创建 manifest.json 和 memory.json 跟踪进化
-
-  🔄 N 个独立循环:
-     调查循环 phaseA ⇄ phaseB  max M 次
-     修改循环 phaseC ⇄ phaseD  max K 次
-
-  🔗 依赖: entity-B 等 entity-A, entity-C 等 entity-A
-
-  ⚙️ hooks: investigate 阶段含 worktree 创建/删除
-
-确认？或需要调整：
-  - 调整调查循环上限
-  - 调整修改循环上限
-  - 修改依赖关系
-  - 添加/删除 hooks
   - 让我直接编辑 JSON
 ```
 
 ### 预览要点
+
 
 - **列出推断出的循环**：每个回退箭头对应一个 loopId，上限默认 5
 - **列出推断出的依赖**：从 "A 依赖 B" 等描述提取
@@ -368,17 +329,41 @@ variables.skill_dir = {skill 目录的绝对路径}
 
 ### 保存后必须验证
 
-**一键验证**（推荐）：
-```bash
-python3 {skill_dir}/scripts/validate_pipeline.py .pi/pipelines/{name}.json
+保存 pipeline JSON 后，在插件加载的项目中运行：
 ```
-
-检查 7 项：entityDiscovery、taskTemplate 格式、占位符翻译、transition 合法性、maxIterations、花括号配对、废弃 conditional 类型。exit 0=通过，exit 1=有错误。
-
-**手动检查**（备选）：
+/pipeline validate {name}
+```
+插件内置校验器自动检查 10+ 项约束（entityDiscovery、taskTemplate 格式、占位符翻译、transition 合法性、maxIterations、废弃 conditional 类型等）。exit 0=通过，有错误则列出具体问题。**不再需要外部 validate_pipeline.py 脚本。**
 
 ---
 
+
+## 输出契约（内置）
+
+插件自动在每个阶段的 Agent prompt 末尾注入输出格式要求：
+
+```
+VERDICT: <PASS | FAIL | UNCLEAR>
+SUMMARY: <one-line summary>
+FINDINGS:
+- <key finding>
+```
+
+路由表的 `outputContains: "VERDICT: PASS"` 依赖此格式。无需手动配置。
+
+## 可视化
+
+配置完成后可通过 `/pipeline graph {name}` 查看 Mermaid 流程图，直观展示阶段顺序、路由条件、循环边。
+
+## 模板变量（含复用支持）
+
+| 变量 | 含义 |
+|:--|:--|
+| `{entity}` | 当前实体 ID |
+| `{outputDir}` | 输出目录（**可通过 `--vars outputDir=...` 覆盖**，实现同流程换任务） |
+| `{lastOutput}` | 上一阶段输出全文 |
+| `{lastPhaseSummary.verdict}` | 上一阶段结构化摘要 |
+| `{自定义变量}` | 来自 `variables` 或 `--vars` |
 ## 路由表语法速查
 
 ### 条件类型
@@ -480,3 +465,5 @@ SKILL.md: 4 阶段，2 个模型判断循环，1 个 LLM 裁决
 | skill_dir 用相对路径 | validate 找不到脚本 | 填绝对路径 |
 | `input_path`/`output_path` 包含 `$VAR` | 变量不会被替换 | 改写为 `{var_name}` 模板 |
 | 阶段名含空格或特殊字符 | 文件路径问题 | 用下划线或驼峰 |
+
+> **验证建议**：保存 pipeline JSON 后立即运行 `/pipeline validate {name}`，一步检测以上所有错误。

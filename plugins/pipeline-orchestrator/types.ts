@@ -93,8 +93,6 @@ export interface PipelineDefinition {
 	name: string;
 	/** What kind of entities this pipeline operates on */
 	entityType: string;
-	/** Lifecycle mode: "oneshot" (single-use) or "iterative" (evolving pipeline) */
-	lifecycle?: "oneshot" | "iterative";
 	/** Shared variables for task templates (e.g. study_dir, skill_dir). May be plain string or {description, default} object. */
 	variables: Record<string, string | { description?: string; default?: string }>;
 	/** Ordered list of phases */
@@ -119,38 +117,6 @@ export interface PhaseSummary {
 	keyFindings: string[];
 }
 
-/** Change manifest entry — one edit to pipeline.json tracked across iterations */
-export interface ChangeEntry {
-	target: string;
-	before: unknown;
-	after: unknown;
-	why: string;
-	verdict: "kept" | "reverted" | null;
-}
-
-export interface ChangeRound {
-	round: number;
-	timestamp: string;
-	changes: ChangeEntry[];
-}
-
-export interface ChangeManifest {
-	rounds: ChangeRound[];
-}
-
-/** Accumulated lesson from pipeline runs */
-export interface Lesson {
-	pattern: string;
-	rootCause: string;
-	fix: string;
-	confirmedRuns: string[];
-	regressionRuns: string[];
-}
-
-export interface MemoryStore {
-	lessons: Lesson[];
-}
-
 /** Runtime state of a single entity going through the pipeline */
 export interface EntityState {
 	entityId: string;
@@ -167,7 +133,8 @@ export interface EntityState {
 	phaseOutputs?: Record<string, string>;
 	/** Per-phase structured summaries (phase name → summary) */
 	phaseSummaries: Record<string, PhaseSummary>;
-	updatedAt: string;
+	/** Name of the most recently executed phase (for correct summary handoff in non-linear pipelines) */
+	lastExecutedPhase?: string;
 }
 
 /** Persisted pipeline run record */

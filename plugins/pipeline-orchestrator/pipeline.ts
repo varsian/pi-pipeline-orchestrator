@@ -1,15 +1,18 @@
 /**
- * Pipeline Orchestrator — execution engine
+ * Pipeline Orchestrator — execution engine v5 (omp)
  *
- * Spawns pi subprocesses for each phase execution.
- * Uses the same mechanism as pi's subagent extension:
- *   pi --mode json -p --no-session --append-system-prompt <agent-file> "Task: ..."
+ * Uses omp's createAgentSession SDK (in-process) instead of spawning
+ * pi subprocesses. This eliminates JSON stream parsing fragility and
+ * gives direct access to structured agent output.
  */
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import {
+	createAgentSession,
+	SessionManager,
+} from "@oh-my-pi/pi-coding-agent";
 import type { AgentConfig } from "./agents.js";
 import type { PhaseDefinition } from "./types.js";
 
@@ -20,20 +23,22 @@ export interface PhaseResult {
 	output: string;
 	stderr: string;
 	error?: string;
-	/** Path to trace file (streamed to disk, not in memory) */
-	tracePath?: string;
+}
+
+/** Parse comma-separated tool names string into array, filtering empties. */
+function parseToolNames(raw: string | undefined): string[] {
+	if (!raw) return [];
+	return raw
+		.split(",")
+		.map((t) => t.trim())
+		.filter(Boolean);
 }
 
 /**
- * Run a single phase for an entity.
+ * Run a single phase for an entity using an in-memory omp agent session.
  *
- * Spawns: pi --mode json -p --no-session
- *   --append-system-prompt <tmp-agent-file>
- *   [--model <model>]
- *   [--tools <tools>]
- *   "Task: <prompt>"
- *
- * Returns the final assistant text output.
+ * The agent's system prompt is prepended to the task as context.
+ * Agent output is collected from the final assistant message.
  */
 export async function executePhase(
 	entityId: string,
@@ -45,8 +50,8 @@ export async function executePhase(
 	signal?: AbortSignal,
 	logPath?: string,
 	retry?: number,
-	/** Variables for hook substitution (e.g. { entity, repo_dir, work_dir }) */
 	hookVars?: Record<string, string>,
+	logger?: { info: (msg: string, data?: unknown) => void; warn: (msg: string, data?: unknown) => void; error: (msg: string, data?: unknown) => void },
 ): Promise<PhaseResult> {
 	const result: PhaseResult = {
 		entityId,
@@ -56,48 +61,25 @@ export async function executePhase(
 		stderr: "",
 	};
 
-	// Default 30-minute timeout per phase (prevent indefinite hang)
 	const timeoutMs = (phase.timeoutMinutes ?? 30) * 60 * 1000;
-	const phaseSignal = signal ?? AbortSignal.timeout(timeoutMs);
-
-	// Write agent system prompt to temp file
-	const tmpDir = await fs.promises.mkdtemp(
-		path.join(os.tmpdir(), "pi-pipeline-"),
-	);
-	const tmpPromptPath = path.join(tmpDir, `agent-${agent.name}.md`);
-	await fs.promises.writeFile(tmpPromptPath, agent.systemPrompt, "utf-8");
 
 	// ── PhaseHooks: before ──
 	if (phase.hooks?.before) {
-		let hookCmd = phase.hooks.before;
-		// Variable substitution: {entity} + any hookVars
-		hookCmd = hookCmd.replace(/\{entity\}/g, entityId);
-		if (hookVars) {
-			for (const [k, v] of Object.entries(hookVars)) {
-				hookCmd = hookCmd.replace(new RegExp(`\\{${k}\\}`, "g"), v);
-			}
-		}
-		try {
-			const r = spawnSync("bash", ["-c", hookCmd], { cwd, timeout: 30000 });
-			if (r.status !== 0) {
-				result.error = `hooks.before failed (exit ${r.status}): ${r.stderr?.toString().slice(0, 200)}`;
-				result.exitCode = 1;
-				return result;
-			}
-		} catch (err: unknown) {
-			const msg = err instanceof Error ? err.message : String(err);
-			result.error = `hooks.before error: ${msg}`;
+		const hookResult = runHook(
+			phase.hooks.before,
+			entityId,
+			hookVars,
+			cwd,
+			"before",
+		);
+		if (hookResult) {
+			result.error = hookResult;
 			result.exitCode = 1;
 			return result;
 		}
 	}
 
-	// Stream trace events to temp file (avoids OOM from accumulating in memory)
-	const tracePath = path.join(tmpDir, "trace.jsonl");
-	const traceStream = fs.createWriteStream(tracePath, { flags: "a" });
-	result.tracePath = tracePath;
-
-	// Stream human-readable log if path provided
+	// ── Open log file if path provided ──
 	let logStream: fs.WriteStream | null = null;
 	if (logPath) {
 		try {
@@ -106,207 +88,233 @@ export async function executePhase(
 			if (retry && retry > 0) {
 				logStream.write(`\n\n--- Retry ${retry} ---\n\n`);
 			} else {
-				logStream.write(`# Agent: ${agent.name}\n# Phase: ${phase.name}\n# Entity: ${entityId}\n# Time: ${new Date().toISOString()}\n\n`);
+				logStream.write(
+					`# Agent: ${agent.name}\n# Phase: ${phase.name}\n# Entity: ${entityId}\n# Time: ${new Date().toISOString()}\n\n`,
+				);
 			}
 		} catch {
 			/* non-critical */
 		}
 	}
 
+	const model = phase.model || agent.model;
+	const toolNames = parseToolNames(
+		phase.tools ?? agent.tools?.join(","),
+	);
+
+	// Prepend agent system prompt to task as context
+	const combinedPrompt = `<agent-instructions>\n${agent.systemPrompt}\n</agent-instructions>\n\n${taskPrompt}`;
+
 	try {
-		const args: string[] = [
-			"--mode",
-			"json",
-			"-p",
-			"--no-session",
-			"--append-system-prompt",
-			tmpPromptPath,
-		];
-
-		const model = phase.model || agent.model;
-		if (model) args.push("--model", model);
-		if (phase.tools || agent.tools?.length) {
-			const tools = phase.tools || agent.tools?.join(",") || "";
-			if (tools) args.push("--tools", tools);
-		}
-
-		args.push(taskPrompt);
-
-		const exitCode = await new Promise<number>((resolve) => {
-			const proc = spawn("pi", args, {
-				cwd,
-				stdio: ["ignore", "pipe", "pipe"],
-			});
-
-			let buffer = "";
-			let lastAssistantText = "";
-
-			proc.stdout.on("data", (data: Buffer) => {
-				buffer += data.toString();
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-
-				for (const line of lines) {
-					if (!line.trim()) continue;
-					traceStream.write(`${line}
-`);
-					try {
-						const event = JSON.parse(line);
-					// ── Stream to human-readable log (pi JSON event format) ──
-					if (logStream) {
-						const inner = event.assistantMessageEvent || event;
-						const etype = inner.type || event.type;
-						if (etype === "toolcall_start" || event.type === "tool_use") {
-							const t = inner.toolName || event.toolName || "?";
-							const inp = inner.toolInput || event.toolInput || {};
-							const fp = inp.filePath || inp.path || "";
-							const nm = fp ? fp.split("/").pop() : "";
-							logStream.write(`\n📎 [${t}] ${nm || fp || ""}\n`);
-						} else if (etype === "text_delta" || etype === "thinking_delta") {
-							// Use inner.delta (incremental), NOT partial.content[].text (cumulative)
-							const delta = inner.delta;
-							if (typeof delta === "string" && delta) logStream.write(delta);
-						} else if (event.type === "message_delta" && event.delta?.text) {
-							logStream.write(event.delta.text);
-						} else if (event.type === "content_block_delta" && event.delta?.text) {
-							logStream.write(event.delta.text);
-						} else if (event.type === "stream_event" && event.text) {
-							logStream.write(event.text);
-						}
-					}
-						// Real-time activity + assistant text tracking (pi message_update format)
-						const inner = event.assistantMessageEvent || event;
-						const etype = event.assistantMessageEvent ? inner.type : event.type;
-						if (onActivity) {
-							if (etype === "thinking_start") {
-								onActivity("💭 思考中...");
-							} else if (etype === "toolcall_start" || event.type === "tool_use") {
-								const tool = inner.toolName || event.toolName || "?";
-								const inp = inner.toolInput || event.toolInput || {};
-								const fp = inp.filePath || inp.path || "";
-								const name = fp ? fp.split("/").pop() : "";
-								if (tool === "read" && name) onActivity(`🔍 读取 ${name}`);
-								else if (tool === "write" && name) onActivity(`✏️ 写入 ${name}`);
-								else if (tool === "edit" && name) onActivity(`🔧 编辑 ${name}`);
-								else onActivity(`🔧 ${tool}`);
-							}
-						}
-						// Capture assistant text from message_end (or message_update text_end)
-						if (etype === "text_end" || event.type === "message_end") {
-							const msg = event.message || inner.partial;
-							if (msg?.role === "assistant" || msg?.role === undefined) {
-								if (msg.stopReason === "error" && msg.errorMessage) {
-									result.error = msg.errorMessage;
-								}
-								const text = msg.content
-									?.filter((p: { type: string }) => p.type === "text" || p.type === "output_text")
-									.map((p: { text: string }) => p.text)
-									.join("\n");
-								if (text) lastAssistantText = text;
-							}
-						}
-					} catch {
-						// skip malformed JSON lines
-					}
-				}
-			});
-
-			proc.stderr.on("data", (data: Buffer) => {
-				result.stderr += data.toString();
-			});
-
-			proc.on("close", (code) => {
-				if (buffer.trim()) {
-					traceStream.write(`${buffer.trim()}
-`);
-					try {
-						const event = JSON.parse(buffer.trim());
-						const inner = event.assistantMessageEvent || event;
-						const etype = event.assistantMessageEvent ? inner.type : event.type;
-						if (etype === "text_end" || event.type === "message_end") {
-							const msg = event.message || inner.partial;
-							if (msg?.role === "assistant" || msg?.role === undefined) {
-								if (msg.stopReason === "error" && msg.errorMessage) {
-									result.error = msg.errorMessage;
-								}
-								const text = msg.content
-									?.filter((p: { type: string }) => p.type === "text" || p.type === "output_text")
-									.map((p: { text: string }) => p.text)
-									.join("\n");
-								if (text) lastAssistantText = text;
-							}
-						}
-					} catch {
-						// skip
-					}
-				}
-				result.output = lastAssistantText;
-				traceStream.end();
-				resolve(code ?? 0);
-			});
-
-			proc.on("error", () => resolve(1));
-
-			if (phaseSignal) {
-				const onAbort = () => {
-					proc.kill("SIGTERM");
-					setTimeout(() => {
-						if (!proc.killed) proc.kill("SIGKILL");
-					}, 5000);
-				};
-				if (phaseSignal.aborted) {
-					result.error = "Phase timed out (30 min)";
-					onAbort();
-				} else phaseSignal.addEventListener("abort", onAbort, { once: true });
-			}
+		const { session } = await createAgentSession({
+			sessionManager: SessionManager.inMemory(),
+			model,
+			toolNames: toolNames.length > 0 ? toolNames : undefined,
+			disableExtensionDiscovery: true,
+			enableMCP: false,
+			enableLsp: false,
 		});
 
-	// ── PhaseHooks: after ──
-	if (result.exitCode === 0 && phase.hooks?.after) {
-		let hookCmd = phase.hooks.after;
-		hookCmd = hookCmd.replace(/\{entity\}/g, entityId);
-		if (hookVars) {
-			for (const [k, v] of Object.entries(hookVars)) {
-				hookCmd = hookCmd.replace(new RegExp(`\\{${k}\\}`, "g"), v);
-			}
-		}
+		let lastText = "";
+
+		const unsubscribe = session.subscribe(
+			(event: unknown) => {
+				const e = event as Record<string, unknown>;
+				const type = typeof e.type === "string" ? e.type : "";
+
+				// Activity notifications
+				if (onActivity) {
+					if (type === "tool_execution_start") {
+						const toolName =
+							typeof e.toolName === "string" ? e.toolName : "?";
+						onActivity(`🔧 ${toolName}`);
+					} else if (type === "thinking_start") {
+						onActivity("💭 thinking…");
+					}
+				}
+
+				// Log writing
+				if (logStream) {
+					if (type === "tool_execution_start") {
+						const toolName =
+							typeof e.toolName === "string" ? e.toolName : "?";
+						logStream.write(`\n📎 [${toolName}]\n`);
+					}
+				}
+
+				// Capture final assistant text from message_update.text_end
+				if (type === "message_update") {
+					const inner = e.assistantMessageEvent as
+						| Record<string, unknown>
+						| undefined;
+					if (inner?.type === "text_end") {
+						const partial = inner.partial as
+							| Record<string, unknown>
+							| undefined;
+						const content = partial?.content as
+							| Array<Record<string, unknown>>
+							| undefined;
+						if (content) {
+							lastText = content
+								.filter(
+									(c) =>
+										c.type === "text" ||
+										c.type === "output_text",
+								)
+								.map((c) =>
+									typeof c.text === "string"
+										? c.text
+										: "",
+								)
+								.join("\n");
+						}
+					} else if (
+						inner?.type === "text_delta" &&
+						typeof inner.delta === "string" &&
+						logStream
+					) {
+						logStream.write(inner.delta);
+					}
+				}
+			},
+		);
+
 		try {
-			const r = spawnSync("bash", ["-c", hookCmd], { cwd, timeout: 30000 });
-			if (r.status !== 0) {
-				result.exitCode = 1;
-				result.error = `hooks.after failed (exit ${r.status}): ${r.stderr?.toString().slice(0, 200)}`;
+			const promptPromise = session.prompt(combinedPrompt);
+
+			if (signal) {
+				const { promise: abortPromise, reject: abortReject } =
+					Promise.withResolvers<never>();
+				const onAbort = () =>
+					abortReject(new Error("Phase aborted"));
+				if (signal.aborted) {
+					onAbort();
+				} else {
+					signal.addEventListener("abort", onAbort, {
+						once: true,
+					});
+				}
+				await Promise.race([promptPromise, abortPromise]);
+			} else {
+				const { promise: timeoutPromise, reject: timeoutReject } =
+					Promise.withResolvers<never>();
+				const timer = setTimeout(
+					() => timeoutReject(new Error("Phase timed out")),
+					timeoutMs,
+				);
+				try {
+					await Promise.race([promptPromise, timeoutPromise]);
+				} finally {
+					clearTimeout(timer);
+				}
 			}
 		} catch (err: unknown) {
-			result.exitCode = 1;
-			const msg = err instanceof Error ? err.message : String(err);
-			result.error = `hooks.after error: ${msg}`;
+			const msg =
+				err instanceof Error ? err.message : String(err);
+			if (
+				msg === "Phase aborted" ||
+				msg === "Phase timed out"
+			) {
+				result.error = msg;
+				result.exitCode = 1;
+			} else {
+				result.error = `Agent error: ${msg}`;
+				result.exitCode = 1;
+			}
 		}
-	}
 
-		result.exitCode = exitCode;
-		if (exitCode !== 0 && !result.output) {
-			result.error = result.stderr || `Exit code ${exitCode}`;
+		unsubscribe();
+
+		// Extract final output from the session's branch
+		const branch = session.sessionManager.getBranch();
+		const lastAssistant = branch
+			.filter(
+				(e: Record<string, unknown>) =>
+					e.type === "message" &&
+					Boolean(e.message),
+			)
+			.pop() as Record<string, unknown> | undefined;
+
+		if (lastAssistant && !result.output) {
+			const msg = lastAssistant.message as Record<string, unknown>;
+			const content = msg?.content as
+				| Array<Record<string, unknown>>
+				| undefined;
+			if (content) {
+				result.output = content
+					.filter(
+						(c) =>
+							c.type === "text" ||
+							c.type === "output_text",
+					)
+					.map((c) =>
+						typeof c.text === "string" ? c.text : "",
+					)
+					.join("\n");
+			}
 		}
+
+		// Fallback to text captured from events
+		if (!result.output && lastText) {
+			result.output = lastText;
+		}
+
+		try { await session.dispose(); } catch { /* non-critical */ }
+	} catch (err: unknown) {
+		result.error = `Session error: ${err instanceof Error ? err.message : String(err)}`;
+		result.exitCode = 1;
 		return result;
 	} finally {
-		try {
-			traceStream.end();
-		} catch {
-			/* ok */
-		}
 		try {
 			if (logStream) logStream.end();
 		} catch {
 			/* ok */
 		}
-		try {
-			fs.unlinkSync(tmpPromptPath);
-		} catch {
-			/* ok */
-		}
-		// Note: tmpDir (with trace.jsonl) is NOT deleted here.
-		// index.ts copies trace to outputDir, then cleans up.
 	}
+
+	// ── PhaseHooks: after ──
+	if (result.exitCode === 0 && phase.hooks?.after) {
+		const hookResult = runHook(
+			phase.hooks.after,
+			entityId,
+			hookVars,
+			cwd,
+			"after",
+		);
+		if (hookResult) {
+			result.exitCode = 1;
+			result.error = hookResult;
+		}
+	}
+
+	return result;
+}
+
+/** Run a hook bash command with variable substitution. Returns error string or null. */
+function runHook(
+	command: string,
+	entityId: string,
+	hookVars: Record<string, string> | undefined,
+	cwd: string,
+	stage: "before" | "after",
+): string | null {
+	let cmd = command;
+	cmd = cmd.replace(/\{entity\}/g, entityId);
+	if (hookVars) {
+		for (const [k, v] of Object.entries(hookVars)) {
+			cmd = cmd.replace(new RegExp(`\\{${k}\\}`, "g"), v);
+		}
+	}
+	try {
+		const r = spawnSync("bash", ["-c", cmd], { cwd, timeout: 30000 });
+		if (r.status !== 0) {
+			return `hooks.${stage} failed (exit ${r.status}): ${String(r.stderr).slice(0, 200)}`;
+		}
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err);
+		return `hooks.${stage} error: ${msg}`;
+	}
+	return null;
 }
 
 /**
@@ -317,20 +325,14 @@ export async function runValidation(
 	command: string,
 	cwd: string,
 ): Promise<{ passed: boolean; stdout: string; stderr: string }> {
-	return new Promise((resolve) => {
-		const proc = spawn("bash", ["-c", command], {
-			cwd,
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-		let stdout = "";
-		let stderr = "";
-
-		proc.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
-		proc.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
-
-		proc.on("close", (code) => {
-			resolve({ passed: code === 0, stdout, stderr });
-		});
-		proc.on("error", () => resolve({ passed: false, stdout, stderr }));
+	const proc = spawnSync("bash", ["-c", command], {
+		cwd,
+		timeout: 30000,
+		encoding: "utf-8",
 	});
+	return {
+		passed: proc.status === 0,
+		stdout: proc.stdout?.toString() ?? "",
+		stderr: proc.stderr?.toString() ?? "",
+	};
 }
