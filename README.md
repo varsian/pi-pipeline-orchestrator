@@ -1,4 +1,4 @@
-# Pipeline Orchestrator for pi
+# Pipeline Orchestrator for omp
 
 **Declarative multi-agent pipeline orchestration engine** — JSON-defined state machines, parallel sub-agent execution, retry, LLM decision points, and resumable state.
 
