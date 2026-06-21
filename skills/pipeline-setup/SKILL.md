@@ -74,7 +74,7 @@ cp {skill}/agents/*.md .pi/agents/
 | skill 目录名 | `name` | 去掉空格和特殊字符 |
 | SKILL.md 描述的实体类型 | `entityType` | 如"topics"、"modules"、"repos" |
 | SKILL.md 的 `$VAR/path/` 模式 | `entityDiscovery.pattern` | 替换 `$VAR` 为 `{var_name}` |
-| SKILL.md 的输出路径 | `outputDir` | 占位符换 `{entity}` |
+| SKILL.md 的输出路径 | `outputDir` | 占位符换 `{pipelineId}` 和 `{entity}` |
 | "循环 N 次" / "最多回退 N 次" | `maxIterations` | 默认 5 |
 | 用户变量名列表 | `variables` | 默认值留空，`skill_dir` 填绝对路径 |
 

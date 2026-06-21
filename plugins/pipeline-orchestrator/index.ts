@@ -94,6 +94,7 @@ export default function (pi: ExtensionAPI) {
 			errors.push("phases must be a non-empty array");
 
 		const validPhaseNames = new Set<string>();
+		const seenNames = new Set<string>();
 		if (Array.isArray(d.phases)) {
 			for (let i = 0; i < d.phases.length; i++) {
 				const p = d.phases[i] as Record<string, unknown> | undefined;
@@ -105,6 +106,11 @@ export default function (pi: ExtensionAPI) {
 				if (typeof pname !== "string" || !pname.trim()) {
 					errors.push(`phases[${i}]: name is required`);
 				} else {
+					if (seenNames.has(pname)) {
+						errors.push(`phases[${i}]: duplicate phase name "${pname}"`);
+					} else {
+						seenNames.add(pname);
+					}
 					validPhaseNames.add(pname);
 				}
 
@@ -180,13 +186,56 @@ export default function (pi: ExtensionAPI) {
 							next !== "__COND__" &&
 							next !== "__MANUAL__" &&
 							next !== "__NEXT__" &&
+							next !== "__SELF__" &&
 							!validPhaseNames.has(next)
 						) {
 							errors.push(
 								`phases[${i}].routes[${j}]: next "${next}" is not a valid phase name`,
 							);
 						}
+						if (typeof next === "string" && (next === "__NEXT__" || next === "__SELF__")) {
+							errors.push(
+								`phases[${i}].routes[${j}]: next "${next}" is a placeholder that must be translated to an actual phase name`,
+							);
+						}
 					}
+				}
+			}
+		}
+
+		// Cycle detection via DFS
+		if (Array.isArray(d.phases) && errors.length === 0) {
+			const graph = new Map<string, string[]>();
+			for (const p of d.phases as Array<Record<string, unknown>>) {
+				const from = p.name as string;
+				const targets: string[] = [];
+				const trans = p.transition as Record<string, unknown> | undefined;
+				if (trans && "routes" in trans && Array.isArray(trans.routes)) {
+					for (const r of trans.routes as Array<Record<string, unknown>>) {
+						const n = r.next as string;
+						if (n && n !== "done" && n !== "__LLM__" && n !== "__COND__" && n !== "__MANUAL__" && n !== "__NEXT__" && validPhaseNames.has(n)) {
+							targets.push(n);
+						}
+					}
+				}
+				graph.set(from, targets);
+			}
+			const color = new Map<string, number>();
+			const cycle = (node: string): boolean => {
+				const c = color.get(node) ?? 0;
+				if (c === 1) return true;
+				if (c === 2) return false;
+				color.set(node, 1);
+				for (const next of graph.get(node) ?? []) {
+					if (cycle(next)) return true;
+				}
+				color.set(node, 2);
+				return false;
+			};
+			for (const node of graph.keys()) {
+				if (cycle(node)) {
+					errors.push("route graph contains a cycle — add an exit condition (e.g. maxIterations or a 'done' route)");
+					break;
 				}
 			}
 		}
@@ -336,6 +385,8 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
+			state.resetStrandedEntities();
+
 			autoLoadDefinitions(ctx.cwd);
 
 			// Recover pending LLM waiters after restart
@@ -360,6 +411,7 @@ export default function (pi: ExtensionAPI) {
 		def: PipelineDefinition,
 		entityId: string,
 		extraVars: Record<string, string>,
+		pipelineId: string,
 	): string | null {
 		// Allow --vars outputDir=/custom/path override
 		if (extraVars.outputDir) {
@@ -373,6 +425,7 @@ export default function (pi: ExtensionAPI) {
 			...state.flattenVars(def.variables),
 			...extraVars,
 			entity: entityId,
+			pipelineId,
 		};
 		for (const [k, v] of Object.entries(vars)) {
 			dir = dir.replace(new RegExp(`\\{${k}\\}`, "g"), v);
@@ -485,6 +538,9 @@ export default function (pi: ExtensionAPI) {
 		}
 
 
+
+
+		const _log = (msg: string) => pi.logger?.info(msg);
 
 		/** Build real-time pipeline status widget (max 10 lines) */
 		const updateStatus = () => {
@@ -633,7 +689,7 @@ export default function (pi: ExtensionAPI) {
 
 					// ── skipIf evaluation ──
 					if (phaseDef.skipIf) {
-						const skipOutputDir = resolveOutputDir(def, entityId, extraVars) || "";
+						const skipOutputDir = resolveOutputDir(def, entityId, extraVars, pipelineId) || "";
 						const shouldSkip = state.evaluateSkipIf(
 							phaseDef, entityId, extraVars,
 							state.flattenVars(def.variables), skipOutputDir, cwd,
@@ -810,8 +866,7 @@ export default function (pi: ExtensionAPI) {
 						state.updateEntity(appendEntry, pipelineId, entityId, { status: "running", retries });
 						updateStatus();
 
-						const taskPrompt = state.renderTaskTemplate(pipelineId, entityId, extraVars);
-						const logDir = resolveOutputDir(def, entityId, extraVars);
+						const logDir = resolveOutputDir(def, entityId, extraVars, pipelineId);
 						_log(`  ▶ ${currentBase} [${phaseDef.agent}]${retries > 0 ? ` (retry ${retries})` : ""}`);
 
 						const result = await executePhase(
@@ -851,7 +906,7 @@ export default function (pi: ExtensionAPI) {
 
 						// Auto-version declared output files
 						if (phaseDef.versionOutputs?.length) {
-							const outDir = resolveOutputDir(def, entityId, extraVars);
+							const outDir = resolveOutputDir(def, entityId, extraVars, pipelineId);
 							if (outDir) state.versionOutputFiles(phaseDef, entity.iter ?? 0, outDir);
 						}
 
@@ -872,7 +927,7 @@ export default function (pi: ExtensionAPI) {
 						if (phaseDef.validate) {
 							const v = phaseDef.validate;
 							let valCmd: string = typeof v === "string" ? v : (v as any).bash || "";
-							const outputDir = resolveOutputDir(def, entityId, extraVars) || "";
+							const outputDir = resolveOutputDir(def, entityId, extraVars, pipelineId) || "";
 							const allVars: Record<string, string> = {
 								...state.flattenVars(def.variables), ...extraVars,
 								entity: entityId, pipelineId, outputDir,
@@ -1028,6 +1083,14 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 				const errors = validatePipelineDefinition(def);
+
+				// Check agent existence (only user+project agents)
+				const agents = discoverAgents(ctx.cwd, undefined);
+				for (const phase of def.phases) {
+					if (phase.agent && !agents.has(phase.agent)) {
+						errors.push(`Phase "${phase.name}": agent "${phase.agent}" not found`);
+					}
+				}
 				if (errors.length === 0) {
 					ctx.ui.notify(
 						`✅ Pipeline "${pipelineName}" is valid. ${def.phases.length} phases: ${def.phases.map((p) => p.name).join(" → ")}`,
@@ -1055,6 +1118,64 @@ export default function (pi: ExtensionAPI) {
 				}
 				const graph = generateGraph(def);
 				ctx.ui.notify(graph, "info");
+				return;
+			}
+
+			// ── /pipeline logs <id> [--entity <e>] [--phase <p>] [--tail <n>] ──
+			if (sub === "logs" && parts[1]) {
+				const pipelineId = parts[1];
+				const record = state.getPipeline(pipelineId);
+				if (!record) {
+					ctx.ui.notify(`Pipeline "${pipelineId}" not found.`, "error");
+					return;
+				}
+				let entityFilter: string | null = null;
+				let phaseFilter: string | null = null;
+				let tailLines = 50;
+				for (let i = 2; i < parts.length; i++) {
+					if (parts[i] === "--entity" && parts[i + 1]) { entityFilter = parts[++i]; }
+					else if (parts[i] === "--phase" && parts[i + 1]) { phaseFilter = parts[++i]; }
+					else if (parts[i] === "--tail" && parts[i + 1]) { tailLines = parseInt(parts[++i], 10) || 50; }
+				}
+
+				const entities = entityFilter
+					? [entityFilter]
+					: Object.keys(record.entities);
+				const phases = phaseFilter
+					? [phaseFilter]
+					: record.definition.phases.map(p => p.name);
+
+				const baseVars = state.flattenVars(record.definition.variables);
+				let outputBase = ".";
+				if (record.definition.outputDir) {
+					outputBase = record.definition.outputDir;
+					for (const [k, v] of Object.entries(baseVars)) {
+						outputBase = outputBase.replace(new RegExp(`\\{${k}\\}`, "g"), v || "");
+					}
+				}
+
+				const output: string[] = [];
+				for (const entityId of entities) {
+					let entityDir = outputBase.replace(/\{entity\}/g, entityId).replace(/\{pipelineId\}/g, pipelineId);
+					entityDir = entityDir.replace(/\/+/g, "/").replace(/\/$/, "");
+					const ent = record.entities[entityId];
+					const icon = ent?.status === "completed" ? "✅" : ent?.status === "failed" ? "❌" : ent?.status === "running" ? "▶" : "⏳";
+					output.push(`\n## ${icon} ${entityId}`);
+
+					for (const phaseName of phases) {
+						const logPath = path.join(entityDir, `.agent-${phaseName}.log`);
+						try {
+							const content = fs.readFileSync(logPath, "utf-8");
+							const lines = content.split("\n");
+							const tail = tailLines > 0 ? lines.slice(-tailLines) : lines;
+							output.push(`\n### ${phaseName} (${logPath})`);
+							output.push(tail.join("\n"));
+						} catch {
+							output.push(`\n### ${phaseName} — no log file`);
+						}
+					}
+				}
+				ctx.ui.notify(output.join("\n"), "info");
 				return;
 			}
 

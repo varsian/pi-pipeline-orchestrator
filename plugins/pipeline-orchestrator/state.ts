@@ -76,6 +76,19 @@ export function restoreFromEntries(
 	}
 }
 
+/** Reset entities stuck in "running" status (crashed mid-phase) to "pending" for resume. */
+export function resetStrandedEntities(): void {
+	for (const record of store.values()) {
+		for (const entity of Object.values(record.entities)) {
+			if (entity.status === "running") {
+				entity.status = "pending";
+				entity.updatedAt = new Date().toISOString();
+				record.updatedAt = entity.updatedAt!;
+			}
+		}
+	}
+}
+
 export function getPipeline(pipelineId: string): PipelineRecord | undefined {
 	return store.get(pipelineId);
 }
@@ -137,7 +150,7 @@ export function updateEntity(
 		updatedAt: new Date().toISOString(),
 	};
 	record.entities[entityId] = updated;
-	record.updatedAt = updated.updatedAt;
+	record.updatedAt = updated.updatedAt!;
 	appendEntry(ENTRY_TYPE, record);
 	onPersist?.(record);
 	return updated;
@@ -428,6 +441,7 @@ export function renderTaskTemplate(
 			...flattenVars(record.definition.variables),
 			...extraVars,
 			entity: entityId,
+			pipelineId,
 		};
 		outputDir = substituteVars(record.definition.outputDir, tmpVars);
 	}
@@ -481,6 +495,30 @@ export function renderTaskTemplate(
 		"- <key finding>\n\n" +
 		"The pipeline routes based on this output. " +
 		"Omission will stall the workflow.";
+	const prevPhase = entity.lastExecutedPhase;
+	if (prevPhase) {
+		const summary = entity.phaseSummaries?.[prevPhase];
+		let context = `\n\n---\n## PREVIOUS PHASE: ${prevPhase}`;
+		if (summary) {
+			context += `\nVerdict: ${summary.verdict}`;
+			if (summary.keyFindings.length > 0) {
+				context += `\nFindings:\n${summary.keyFindings.map(f => `- ${f}`).join('\n')}`;
+			}
+			const output = entity.phaseOutputs?.[prevPhase] ?? entity.lastOutput ?? "";
+			if (output) {
+				const truncated = output.length > 2000 ? output.slice(0, 2000) + "\n…[truncated]" : output;
+				context += `\nOutput:\n${truncated}`;
+			}
+		} else {
+			const output = entity.lastOutput ?? "";
+			if (output) {
+				const truncated = output.length > 2000 ? output.slice(0, 2000) + "\n…[truncated]" : output;
+				context += `\n${truncated}`;
+			}
+		}
+		context += "\n---\n";
+		template = context + template;
+	}
 
 	return template;
 }

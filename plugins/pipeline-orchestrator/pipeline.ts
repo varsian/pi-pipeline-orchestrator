@@ -79,6 +79,7 @@ export async function executePhase(
 		}
 	}
 
+	const tracePath = logPath ? logPath.replace(/\.log$/, ".trace.jsonl") : undefined;
 	// ── Open log file if path provided ──
 	let logStream: fs.WriteStream | null = null;
 	if (logPath) {
@@ -92,6 +93,17 @@ export async function executePhase(
 					`# Agent: ${agent.name}\n# Phase: ${phase.name}\n# Entity: ${entityId}\n# Time: ${new Date().toISOString()}\n\n`,
 				);
 			}
+		} catch {
+			/* non-critical */
+		}
+	}
+
+	// ── Open trace file (JSONL) if logPath provided ──
+	let traceStream: fs.WriteStream | null = null;
+	if (tracePath) {
+		try {
+			fs.mkdirSync(path.dirname(tracePath), { recursive: true });
+			traceStream = fs.createWriteStream(tracePath, { flags: "a" });
 		} catch {
 			/* non-critical */
 		}
@@ -140,6 +152,27 @@ export async function executePhase(
 							typeof e.toolName === "string" ? e.toolName : "?";
 						logStream.write(`\n📎 [${toolName}]\n`);
 					}
+				}
+
+				// Trace JSONL writing
+				if (traceStream) {
+					const traceEntry: Record<string, unknown> = {
+						ts: new Date().toISOString(),
+						entity: entityId,
+						phase: phase.name,
+						type,
+					};
+					if (type === "tool_execution_start") {
+						traceEntry.toolName = typeof e.toolName === "string" ? e.toolName : "?";
+					} else if (type === "message_update") {
+						const inner = (e as Record<string, unknown>).assistantMessageEvent as Record<string, unknown> | undefined;
+						if (inner?.type === "text_end") {
+							traceEntry.textEnd = true;
+						}
+						// Note: text_delta content is intentionally NOT written to trace
+						// to avoid duplicating the full agent output (already in .log files)
+					}
+					traceStream.write(JSON.stringify(traceEntry) + "\n");
 				}
 
 				// Capture final assistant text from message_update.text_end
@@ -270,6 +303,7 @@ export async function executePhase(
 		} catch {
 			/* ok */
 		}
+		try { if (traceStream) traceStream.end(); } catch { /* ok */ }
 	}
 
 	// ── PhaseHooks: after ──

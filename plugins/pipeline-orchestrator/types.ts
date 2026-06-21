@@ -135,6 +135,8 @@ export interface EntityState {
 	phaseSummaries: Record<string, PhaseSummary>;
 	/** Name of the most recently executed phase (for correct summary handoff in non-linear pipelines) */
 	lastExecutedPhase?: string;
+	/** Timestamp of last state update */
+	updatedAt?: string;
 }
 
 /** Persisted pipeline run record */
