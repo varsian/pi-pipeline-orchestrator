@@ -93,3 +93,7 @@ pi-session-*.html
 # omp runtime generated (installed by pipeline-setup skill)
 .omp/pipelines/
 .omp/agents/
+
+# Local source archives
+oh-my-pi-sourcecode/
+.omp/
