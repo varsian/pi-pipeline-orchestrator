@@ -89,3 +89,7 @@ pi-session-*.html
 .pi/agents/
 .pi/pipelines/
 .pi/extensions/
+
+# omp runtime generated (installed by pipeline-setup skill)
+.omp/pipelines/
+.omp/agents/
