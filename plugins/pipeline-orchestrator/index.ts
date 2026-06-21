@@ -950,8 +950,18 @@ export default function (pi: ExtensionAPI) {
 							}
 						}
 
-						// Build PhaseSummary from agent output (word-boundary matching)
-						if (result.output) {
+						// Build PhaseSummary — prefer yield data, fall back to regex
+						if (result.yieldData) {
+							state.updateEntity(appendEntry, pipelineId, entityId, {
+								phaseSummaries: {
+									...(entity.phaseSummaries || {}),
+									[currentBase]: {
+										verdict: result.yieldData.verdict as "PASS" | "FAIL" | "UNCLEAR",
+										keyFindings: result.yieldData.keyFindings,
+									},
+								},
+							});
+						} else if (result.output) {
 							let summaryVerdict: "PASS" | "FAIL" | "UNCLEAR" = "UNCLEAR";
 							// Match VERDICT: PASS / DECISION: PASS etc. with word boundaries
 							if (/\b(?:VERDICT|DECISION|RESULT|STATUS)\s*:\s*PASS\b/i.test(result.output)) {

@@ -485,16 +485,13 @@ export function renderTaskTemplate(
 
 	template = substituteVars(template, vars);
 
-	// ── Output contract: every agent MUST produce structured verdict ──
+	// ── Output contract: every agent MUST produce structured yield output ──
 	template +=
-		"\n\n---\n## OUTPUT REQUIRED\n" +
-		"At the end of your response, you MUST include exactly:\n\n" +
-		"VERDICT: <PASS | FAIL | UNCLEAR>\n" +
-		"SUMMARY: <one-line summary of what was done>\n" +
-		"FINDINGS:\n" +
-		"- <key finding>\n\n" +
-		"The pipeline routes based on this output. " +
-		"Omission will stall the workflow.";
+		"\n\n---\n## COMPLETION\n" +
+		"When finished, you MUST call `yield` exactly once with:\n" +
+		"  yield({ result: { data: { verdict: \"PASS\"|\"FAIL\"|\"UNCLEAR\", summary: \"...\", keyFindings: [...] } } })\n" +
+		"This is your only way to return a result. You NEVER put JSON in plain text.\n" +
+		"Giving up is a last resort. If truly blocked, call yield with result.error describing the blocker.";
 	const prevPhase = entity.lastExecutedPhase;
 	if (prevPhase) {
 		const summary = entity.phaseSummaries?.[prevPhase];

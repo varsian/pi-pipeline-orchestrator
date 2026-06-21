@@ -23,6 +23,8 @@ export interface PhaseResult {
 	output: string;
 	stderr: string;
 	error?: string;
+	/** Structured data from yield tool (when requireYieldTool is enabled) */
+	yieldData?: { verdict: string; summary: string; keyFindings: string[] };
 }
 
 /** Parse comma-separated tool names string into array, filtering empties. */
@@ -37,7 +39,7 @@ function parseToolNames(raw: string | undefined): string[] {
 /**
  * Run a single phase for an entity using an in-memory omp agent session.
  *
- * The agent's system prompt is prepended to the task as context.
+ * The agent's system prompt is injected via the systemPrompt callback.
  * Agent output is collected from the final assistant message.
  */
 export async function executePhase(
@@ -114,9 +116,6 @@ export async function executePhase(
 		phase.tools ?? agent.tools?.join(","),
 	);
 
-	// Prepend agent system prompt to task as context
-	const combinedPrompt = `<agent-instructions>\n${agent.systemPrompt}\n</agent-instructions>\n\n${taskPrompt}`;
-
 	try {
 		const { session } = await createAgentSession({
 			sessionManager: SessionManager.inMemory(),
@@ -125,9 +124,23 @@ export async function executePhase(
 			disableExtensionDiscovery: true,
 			enableMCP: false,
 			enableLsp: false,
+			requireYieldTool: true,
+			outputSchema: {
+				type: "object",
+				properties: {
+					verdict: { type: "string", enum: ["PASS", "FAIL", "UNCLEAR"] },
+					summary: { type: "string" },
+					keyFindings: { type: "array", items: { type: "string" } }
+				},
+				required: ["verdict", "summary"],
+			},
+			systemPrompt: (defaultPrompt: string[]) => {
+				return [`${agent.systemPrompt}\n\n---\n\n${defaultPrompt.join("\n")}`];
+			},
 		});
 
 		let lastText = "";
+		let yieldData: { verdict: string; summary: string; keyFindings: string[] } | undefined;
 
 		const unsubscribe = session.subscribe(
 			(event: unknown) => {
@@ -175,6 +188,21 @@ export async function executePhase(
 					traceStream.write(JSON.stringify(traceEntry) + "\n");
 				}
 
+				// Capture yield result from tool_execution_end
+				if (type === "tool_execution_end" && e.toolName === "yield" && !e.isError) {
+					const details = (e as Record<string, unknown>).result as Record<string, unknown> | undefined;
+					const data = details?.details as Record<string, unknown> | undefined;
+					if (data && typeof data.status === "string" && data.status !== "aborted" && data.data) {
+						const d = data.data as Record<string, unknown>;
+						yieldData = {
+							verdict: typeof d.verdict === "string" ? d.verdict : "UNCLEAR",
+							summary: typeof d.summary === "string" ? d.summary : "",
+							keyFindings: Array.isArray(d.keyFindings) ? d.keyFindings.filter((f: unknown): f is string => typeof f === "string") : [],
+						};
+						if (logStream) logStream.write(`\n✅ [yield] ${yieldData.verdict}: ${yieldData.summary.slice(0, 80)}\n`);
+					}
+				}
+
 				// Capture final assistant text from message_update.text_end
 				if (type === "message_update") {
 					const inner = e.assistantMessageEvent as
@@ -213,7 +241,7 @@ export async function executePhase(
 		);
 
 		try {
-			const promptPromise = session.prompt(combinedPrompt);
+			const promptPromise = session.prompt(taskPrompt);
 
 			if (signal) {
 				const { promise: abortPromise, reject: abortReject } =
@@ -256,7 +284,22 @@ export async function executePhase(
 			}
 		}
 
+		// Yield check: if model didn't call yield, send one reminder
+		if (!yieldData && !result.error) {
+			const reminder = `\n\n<system-reminder>\nYou have NOT called yield. You MUST call yield exactly once with:\n  yield({ result: { data: { verdict: "PASS"|"FAIL"|"UNCLEAR", summary: "...", keyFindings: [...] } } })\nThis is the final reminder. Your work will be accepted even if you respond in plain text, but structured yield output is preferred.\n</system-reminder>`;
+			try {
+				await session.prompt(reminder);
+			} catch {
+				// Non-critical — fall through to regex extraction
+			}
+		}
+
 		unsubscribe();
+
+		// Populate yield data into result (text output from branch extraction below)
+		if (yieldData) {
+			result.yieldData = yieldData;
+		}
 
 		// Extract final output from the session's branch
 		const branch = session.sessionManager.getBranch();
