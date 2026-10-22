@@ -203,7 +203,9 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		// Cycle detection via DFS
+		// Cycle detection via DFS. Loops are a first-class feature (route `iter: true`
+		// + maxIterations), so only flag cycles that contain no `iter` edge at all:
+		// those can spin forever with no iteration guard.
 		if (Array.isArray(d.phases) && errors.length === 0) {
 			const graph = new Map<string, string[]>();
 			for (const p of d.phases as Array<Record<string, unknown>>) {
@@ -213,6 +215,7 @@ export default function (pi: ExtensionAPI) {
 				if (trans && "routes" in trans && Array.isArray(trans.routes)) {
 					for (const r of trans.routes as Array<Record<string, unknown>>) {
 						const n = r.next as string;
+						if (r.iter === true) continue; // guarded loop edge — ok
 						if (n && n !== "done" && n !== "__LLM__" && n !== "__COND__" && n !== "__MANUAL__" && n !== "__NEXT__" && validPhaseNames.has(n)) {
 							targets.push(n);
 						}
@@ -234,7 +237,7 @@ export default function (pi: ExtensionAPI) {
 			};
 			for (const node of graph.keys()) {
 				if (cycle(node)) {
-					errors.push("route graph contains a cycle — add an exit condition (e.g. maxIterations or a 'done' route)");
+					errors.push("route graph contains an unguarded cycle — add \"iter\": true to the loop route with maxIterations, or a done/__LLM__ exit");
 					break;
 				}
 			}
@@ -307,9 +310,9 @@ export default function (pi: ExtensionAPI) {
 								: "?";
 					const next =
 						r.next === "__LLM__"
-							? "llm(["💬 LLM"])"
+							? 'llm(["💬 LLM"])'
 							: r.next === "done"
-								? "done(["✅ done"])"
+								? 'done(["✅ done"])'
 								: r.next;
 					const style = r.iter ? " -.->|loop| " : " -->|";
 					lines.push(`  ${p.name}${style}${cond}| ${next}`);
@@ -713,7 +716,7 @@ export default function (pi: ExtensionAPI) {
 					// ── Handle special route markers ──
 					const handleSpecialRoute = async (
 						routeResult: { next: string | null; iter: boolean; prompt?: string; loopId?: string },
-						currentEntity: { iter: number },
+						currentEntity: { iter: number; loopCounters?: Record<string, number> },
 					): Promise<{ handled: boolean; breakLoop?: boolean }> => {
 						if (!routeResult.next) return { handled: true, breakLoop: true };
 
@@ -784,9 +787,14 @@ export default function (pi: ExtensionAPI) {
 								});
 								const trans = phaseDef.transition;
 								const isRouteCond = !("type" in trans && trans.type === "conditional");
+								// Legacy conditional transitions wait for a pass/loop decision.
+								let nextPhase = decision;
+								if ("type" in trans && trans.type === "conditional") {
+									nextPhase = decision === "pass" ? trans.pass : decision === "loop" ? trans.loop : decision;
+								}
 								const shouldIter = isRouteCond ? routeResult.iter : decision === "loop";
 								const lid = routeResult.loopId || "__global__";
-								const counters = { ...currentEntity.loopCounters };
+								const counters = { ...(currentEntity.loopCounters ?? {}) };
 								const newIter = currentEntity.iter + (shouldIter ? 1 : 0);
 								if (shouldIter) {
 									counters[lid] = (counters[lid] || 0) + 1;
@@ -866,6 +874,7 @@ export default function (pi: ExtensionAPI) {
 						state.updateEntity(appendEntry, pipelineId, entityId, { status: "running", retries });
 						updateStatus();
 
+						const taskPrompt = state.renderTaskTemplate(pipelineId, entityId, extraVars);
 						const logDir = resolveOutputDir(def, entityId, extraVars, pipelineId);
 						_log(`  ▶ ${currentBase} [${phaseDef.agent}]${retries > 0 ? ` (retry ${retries})` : ""}`);
 

@@ -60,4 +60,35 @@ declare module "@oh-my-pi/pi-coding-agent" {
 			setWidget?(content: string[], options?: { placement?: "aboveEditor" | "belowEditor" }): void;
 		};
 	}
+
+	/** In-memory session manager used by the pipeline engine for sub-agent sessions. */
+	export class SessionManager {
+		static inMemory(): SessionManager;
+		getBranch(): Array<Record<string, unknown>>;
+	}
+
+	/** Minimal shape of an in-process agent session (see the pi/omp SDK docs). */
+	export interface AgentSession {
+		sessionManager: SessionManager;
+		subscribe(handler: (event: unknown) => void): () => void;
+		prompt(text: string): Promise<unknown>;
+		dispose(): Promise<void>;
+	}
+
+	export interface AgentSessionOptions {
+		sessionManager?: SessionManager;
+		model?: string;
+		toolNames?: string[];
+		disableExtensionDiscovery?: boolean;
+		enableMCP?: boolean;
+		enableLsp?: boolean;
+		requireYieldTool?: boolean;
+		outputSchema?: Record<string, unknown>;
+		systemPrompt?: (defaultPrompt: string[]) => string[];
+		[key: string]: unknown;
+	}
+
+	export function createAgentSession(
+		options?: AgentSessionOptions,
+	): Promise<{ session: AgentSession }>;
 }

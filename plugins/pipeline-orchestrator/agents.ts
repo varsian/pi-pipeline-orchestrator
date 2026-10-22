@@ -1,11 +1,15 @@
 /**
  * Pipeline Orchestrator — agent discovery
  *
- * Adapted from pi's subagent extension.
- * Discovers agent .md files from:
- *   1. ~/.pi/agent/agents/*.md  (user-level)
- *   2. .pi/agents/*.md           (project-level)
- *   3. Skill directory agents/   (skill-level, for card-generator etc.)
+ * Adapted from pi's subagent extension. Discovers agent `.md` files from three
+ * tiers, highest priority last (later tiers override same-named agents):
+ *
+ *   1. User level    — $PI_CODING_AGENT_DIR/agents, ~/.omp/agent/agents, ~/.pi/agent/agents
+ *   2. Project level — .omp/agents, .pi/agents (cwd)
+ *   3. Skill level   — {skillDir}/agents  (highest priority)
+ *
+ * omp (oh-my-pi) is the current runtime target; `.pi` paths are kept as
+ * legacy compatibility for the original pi setup.
  */
 
 import * as fs from "node:fs";
@@ -96,9 +100,26 @@ function loadAgentsFromDir(
 	return agents;
 }
 
-function getAgentDir(): string {
-	const home = process.env.HOME || process.env.USERPROFILE || "~";
-	return path.join(home, ".pi", "agent");
+function getHomeDir(): string {
+	return process.env.HOME || process.env.USERPROFILE || "~";
+}
+
+/** Candidate user-level agent directories, legacy .pi first, omp last (last wins). */
+function userAgentDirs(): string[] {
+	const home = getHomeDir();
+	const dirs = [
+		path.join(home, ".pi", "agent", "agents"),
+		path.join(home, ".omp", "agent", "agents"),
+	];
+	// omp/pi allow relocating the agent dir at runtime; the override wins.
+	const override = process.env.PI_CODING_AGENT_DIR;
+	if (override) dirs.push(path.join(override, "agents"));
+	return [...new Set(dirs)];
+}
+
+/** Candidate project-level agent directories, legacy .pi first, omp last (last wins). */
+function projectAgentDirs(cwd: string): string[] {
+	return [path.join(cwd, ".pi", "agents"), path.join(cwd, ".omp", "agents")];
 }
 
 export function discoverAgents(
@@ -108,16 +129,17 @@ export function discoverAgents(
 	const map = new Map<string, AgentConfig>();
 
 	// 1. User-level agents
-	const userDir = path.join(getAgentDir(), "agents");
-	for (const a of loadAgentsFromDir(userDir, "user")) {
-		map.set(a.name, a);
+	for (const dir of userAgentDirs()) {
+		for (const a of loadAgentsFromDir(dir, "user")) {
+			map.set(a.name, a);
+		}
 	}
 
-	// 2. Project-level agents
-	const projectDir = path.join(cwd, ".pi", "agents");
-	for (const a of loadAgentsFromDir(projectDir, "project")) {
-		// Project agents override user agents of same name
-		map.set(a.name, a);
+	// 2. Project-level agents (override user agents of same name)
+	for (const dir of projectAgentDirs(cwd)) {
+		for (const a of loadAgentsFromDir(dir, "project")) {
+			map.set(a.name, a);
+		}
 	}
 
 	// 3. Skill-level agents (highest priority — override both)
