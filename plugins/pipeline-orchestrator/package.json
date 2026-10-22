@@ -1,7 +1,8 @@
 {
   "name": "pipeline-orchestrator",
   "version": "2.0.0",
-  "description": "Pipeline orchestration extension for omp — declarative multi-phase agent pipelines with state machines, retry, resume, and conditional routing",
+  "private": true,
+  "description": "Declarative multi-agent pipeline orchestration extension for omp (oh-my-pi), the pi-family coding agent — JSON phase state machines, parallel entities, retry, LLM decision points, resumable state. Legacy pi.extensions manifest kept for compatibility.",
   "omp": {
     "extensions": ["./index.ts"]
   },
