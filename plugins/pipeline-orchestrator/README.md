@@ -1,42 +1,34 @@
 # Pipeline Orchestrator
 
-声明式流水线编排插件。通过 JSON 定义多阶段状态机，自动调度子 Agent 执行，支持并行、重试、LLM 决策点、断点续跑。
+**In short (English):** an omp/pi extension that executes JSON-defined multi-phase agent pipelines — parallel entities, retry, route-table decisions, resumable state. A pipeline definition can run `bash` validation commands and hooks, so treat it as executable configuration and only run pipelines you trust (see [SECURITY.md](../../SECURITY.md)). Full reference below is primarily in Chinese.
+
+声明式流水线编排插件。用 JSON 定义多阶段状态机，自动调度子 Agent 执行，支持并行、重试、LLM 决策点、断点续跑。
+
+## Runtime and compatibility
+
+- **Primary runtime:** [omp](https://github.com/can1357/oh-my-pi)（`@oh-my-pi/pi-coding-agent`）。插件通过 `createAgentSession()` 在进程内运行子 Agent。
+- **Legacy:** 保留 `pi.extensions` 清单块、`.pi/pipelines`、`.pi/agents` 路径与 `pi` 时代的 `ExtensionAPI`（命令/工具/`appendEntry`/`sendUserMessage`）。omp 本身接受旧版 `pi.extensions` 清单和 `.pi` 项目覆盖查找。
+- **Upstream Pi:** 引擎直接 `import` 自 `@oh-my-pi/pi-coding-agent`；在原生 Pi 上运行需要把该导入换成对应 Pi SDK 包并验证 `createAgentSession` 选项兼容性。
+- **Node.js ≥ 22**（使用了 `Promise.withResolvers`、`AbortSignal.timeout()` 等较新 API）。
 
 ## 安装
 
-将插件目录放到 pi 的扩展路径下：
+将插件目录放到 omp 的扩展路径下：
 
 ```bash
+# omp（默认）
+mkdir -p ~/.omp/agent/extensions
+cp -r plugins/pipeline-orchestrator ~/.omp/agent/extensions/pipeline-orchestrator
+
+# 旧版 Pi 布局
 cp -r plugins/pipeline-orchestrator ~/.pi/agent/extensions/pipeline-orchestrator
 ```
 
-pi 启动时自动加载 `package.json` 中 `pi.extensions` 声明的入口文件 `index.ts`。
+omp 启动时自动加载 `package.json` 中 `omp.extensions` 声明的入口文件 `index.ts`（旧版运行时读取 `pi.extensions`，同样指向该文件）。
 
-> 配合 **pipeline-setup** skill 使用：该 skill 读取任意兼容 skill 的 SKILL.md 和 agents/，
-> 自动生成 `.pi/pipelines/{name}.json` 和安装 agent 文件，无需手写 pipeline JSON。
+> 配合 **pipeline-setup** skill 使用：该 skill 读取任意兼容 skill 的 SKILL.md 和 agents/，自动生成流水线 JSON 并安装 agent 文件，无需手写。
 
-## 前置依赖
-
-| 依赖 | 最低版本 | 说明 |
-|:--|:--|:--|
-| pi | ≥ 当前支持 ExtensionAPI 的版本 | 插件注册依赖 `registerCommand`、`registerTool`、`appendEntry`、`sendUserMessage` |
-| Node.js | ≥ 18 | `fs.rmSync`（替代弃用的 `rmdirSync`）、`AbortSignal.timeout()` |
-
-## 架构
-
-```
-pipeline.json → executePipelineRun() → Semaphore 池
-                  │                        │
-                  ├─ entity 发现            ├─ entity₁ → phaseLoop
-                  ├─ Agent 发现             ├─ entity₂ → phaseLoop
-                  ├─ 变量替换              └─ entity₃ → phaseLoop
-                  └─ Route 路由                  │
-                                                  ├─ spawn("pi", ...)
-                                                  ├─ 流式日志 + trace
-                                                  ├─ validate bash
-                                                  ├─ __LLM__ 暂停
-                                                  └─ 状态持久化
-```
+---
 
 ## 命令
 
@@ -44,6 +36,9 @@ pipeline.json → executePipelineRun() → Semaphore 池
 |:--|:--|
 | `/pipeline run <name> --vars k=v,...` | 阻塞执行（发现实体 → 逐阶段推进） |
 | `/pipeline run <name> --entity <id> --vars k=v,...` | 单实体执行 |
+| `/pipeline validate <name>` | 校验定义 + 检查引用的 agent 是否存在 |
+| `/pipeline graph <name>` | 输出 Mermaid 流程图 |
+| `/pipeline logs <id> [--entity <e>] [--phase <p>] [--tail <n>]` | 查看阶段日志 |
 | `/pipeline status` | 查看所有流水线状态 |
 | `/pipeline list` | 列出可用流水线定义 |
 | `/pipeline stop <id>` | 暂停（保留进度，可续跑） |
@@ -53,10 +48,12 @@ pipeline.json → executePipelineRun() → Semaphore 池
 
 | 工具 | 说明 |
 |:--|:--|
-| `pipeline_decide(pipelineId, entityId, decision)` | LLM 决策点响应 |
+| `pipeline_decide(pipelineId, entityId, decision)` | LLM 决策点响应（恢复 `__LLM__` 暂停的实体） |
 | `pipeline_status(pipelineId?)` | 查询状态 |
 | `pipeline_stop(pipelineId)` | 暂停 |
 | `pipeline_cancel(pipelineId)` | 取消 |
+
+---
 
 ## Pipeline JSON 定义
 
@@ -71,6 +68,10 @@ pipeline.json → executePipelineRun() → Semaphore 池
   "outputDir": "{work_dir}/outputs/{entity}/",
   "concurrency": 0,                // 0=无限, 1=串行, N=并行上限（默认0）
   "maxIterations": 5,              // 循环阶段上限（默认5）
+  "maxIterationsPerLoop": {        // 可选：按 loopId 独立上限
+    "research_loop": 5,
+    "code_loop": 3
+  },
   "variables": {                   // 模板变量
     "work_dir": { "description": "工作目录", "default": "." },
     "tool_dir": { "description": "工具目录", "default": "/opt/tools" }
@@ -87,7 +88,7 @@ pipeline.json → executePipelineRun() → Semaphore 池
 {
   "name": "phase_name",            // 阶段名（路由目标）
   "label": "可读标签",             // 可选
-  "agent": "agent-name",           // 对应 agents/*.md 的 name 字段
+  "agent": "agent-name",           // 对应 agents/*.md 的 name 字段；省略则直接路由
   "taskTemplate": {
     "template": "处理 {entity}，输入 {work_dir}/data/...",
     "variables": {}                // 模板局部变量（可选）
@@ -98,7 +99,7 @@ pipeline.json → executePipelineRun() → Semaphore 池
   "validate": { "bash": "test -f {outputDir}/result.txt" },
   "maxRetries": 3,                 // 失败重试次数（默认3）
   "timeoutMinutes": 30,            // 超时分钟（默认30）
-  "model": "deepseek-v4-pro",      // 覆盖 Agent 默认模型
+  "model": "your-model-id",        // 覆盖 Agent 默认模型
   "tools": "read,write,bash",      // 覆盖 Agent 默认工具
   "versionOutputs": ["all.txt"],   // 自动版本化：all.txt → 1-all.txt
   "skipIf": {                      // 实体级跳过条件
@@ -106,13 +107,17 @@ pipeline.json → executePipelineRun() → Semaphore 池
     "fileExists": "{work_dir}/markers/done",
     "fileNotExists": "{work_dir}/markers/skip"
   },
-  "skipReason": "原因说明"
+  "skipReason": "原因说明",
+  "hooks": {                       // Agent spawn 前后执行
+    "before": "git worktree add ../wt-{entity} main",
+    "after": "git worktree remove ../wt-{entity} --force 2>/dev/null; true"
+  }
 }
 ```
 
 ### Transition 路由
 
-新版 Route Table（推荐）：
+Route Table（推荐）：
 
 ```jsonc
 "transition": {
@@ -120,22 +125,25 @@ pipeline.json → executePipelineRun() → Semaphore 池
     // 条件路由（所有条件 AND 匹配）
     { "if": { "exitCode": 0, "validatePassed": true }, "next": "next_phase" },
     // 输出内容匹配
-    { "if": { "outputContains": "VERDICT: PASS" }, "next": "advance" },
-    { "if": { "outputContains": "VERDICT: NOT PASS" }, "next": "retry", "iter": true },
+    { "if": { "outputContains": "VERDICT: PASS" }, "next": "done" },
+    { "if": { "outputContains": "VERDICT: NOT PASS" }, "next": "generate", "iter": true },
     // 兜底匹配
     { "if": true, "next": "__LLM__", "prompt": "检查 {entity} 后决定" }
   ]
 }
 ```
 
-旧版兼容（仍支持）：
+循环由 `iter: true` 的路由构成，`maxIterations` / `maxIterationsPerLoop` 是安全阀。校验器只拒绝**没有任何 `iter` 边**的环（那种环无法收敛）。
+
+旧版兼容（仍接受）：
 
 | type | 行为 |
 |:--|:--|
 | `"auto"` | 线性前进到下一阶段 |
 | `"llm"` | 暂停等 `pipeline_decide` |
-| `"conditional"` | 等 pass/loop 决策 |
 | `"manual"` | 等任意阶段名 |
+
+> `"conditional"` 类型已废弃，校验器会拒绝加载；请改用 routes + `outputContains` 或 `"type": "llm"`。
 
 ### RouteCondition 条件类型
 
@@ -145,12 +153,12 @@ pipeline.json → executePipelineRun() → Semaphore 池
 | `validatePassed` | boolean | validate 命令结果 |
 | `outputContains` | string | Agent 输出包含此文本 |
 | `outputRegex` | string | 正则匹配（捕获组可用 captureOp） |
-| `captureOp` | object | `{op:"eq"/"gt"/"gte", value:N}` 数值比较 |
+| `captureOp` | object | `{op:"eq"/"neq"/"gt"/"gte"/"lt"/"lte", value:N}` 数值比较 |
 | `fileExists` | string | 文件存在（支持 `{变量}`） |
 | `fileMinSize` | object | `{path:"...", bytes:N}` 最小文件大小 |
 | `fileMaxSize` | object | `{path:"...", bytes:N}` 最大文件大小 |
 | `bash` | string | bash 命令 exit 0=匹配 |
-| `default` | true | 无其他条件时匹配 |
+| `default` | true | 无其他条件时匹配（也可直接写 `"if": true`） |
 
 ### 特殊路由目标
 
@@ -159,9 +167,15 @@ pipeline.json → executePipelineRun() → Semaphore 池
 | `"phase_name"` | 跳转到指定阶段 |
 | `"done"` | 标记实体完成 |
 | `"__LLM__"` | 暂停等 LLM 决策，需 `prompt` 字段 |
-| `"__COND__"` | 暂停等 pass/loop 决策 |
+| `"__COND__"` | 暂停等 pass/loop 决策（旧版 conditional 用） |
 | `"__MANUAL__"` | 暂停等任意阶段名 |
-| `"__NEXT__"` | 线性下一阶段 |
+
+写作占位符（**保存前必须翻译**，校验器会拒绝字面值）：
+
+| 占位符 | 翻译为 |
+|:--|:--|
+| `"__NEXT__"` | phases 数组中紧接着的下一阶段 name |
+| `"__SELF__"` | 当前阶段 name（配 `"iter": true` 实现循环） |
 
 ## 决策模式
 
@@ -177,8 +191,8 @@ pipeline.json → executePipelineRun() → Semaphore 池
   "agent": "my-reviewer",
   "transition": {
     "routes": [
-      { "if": { "outputContains": "DECISION: PASS" },     "next": "next_phase" },
-      { "if": { "outputContains": "DECISION: RETRY" },    "next": "prev_phase", "iter": true },
+      { "if": { "outputContains": "DECISION: PASS" },  "next": "next_phase" },
+      { "if": { "outputContains": "DECISION: RETRY" }, "next": "prev_phase", "iter": true },
       { "if": true, "next": "__LLM__", "prompt": "Agent 无决策，手动处理 {entity}" }
     ]
   }
@@ -198,7 +212,7 @@ pipeline.json → executePipelineRun() → Semaphore 池
 { "if": true, "next": "__LLM__", "prompt": "检查 {entity} 后决定下一步" }
 ```
 
-- 管道释放并发槽位，其他 Entity 继续执行
+- 流水线释放并发槽位，其他实体继续执行
 - 当前窗口收到 prompt 后，LLM 可读文件、修改内容
 - 最后调用 `pipeline_decide(pipelineId, entityId, "phase_name")` 恢复执行
 - 适用于需要灵活判断、无固定输出格式的决策点
@@ -207,6 +221,18 @@ pipeline.json → executePipelineRun() → Semaphore 池
 |:--|:--|:--|:--|
 | 子 Agent 决策 | `outputContains` + `iter` | Agent 输出标记 | 判断标准明确，可编码为 prompt |
 | LLM 决策 | `"__LLM__"` + `prompt` | 当前窗口调 `pipeline_decide()` | 灵活判断，需读写文件后决定 |
+
+## 结构化输出（yield）
+
+每个阶段会向子 Agent 申请结构化结果：
+
+```json
+{ "verdict": "PASS | FAIL | UNCLEAR", "summary": "一行摘要", "keyFindings": ["..."] }
+```
+
+- 引擎为子 Agent 启用 `requireYieldTool` 并注册输出 schema；未调用 `yield` 时会发送一次提醒
+- 结果存为 `PhaseSummary`，后续阶段可用 `{lastPhaseSummary.verdict}`、`{lastPhaseSummary.keyFindings}` 引用
+- 没有 `yield` 数据时回退到从文本输出提取
 
 ## 任务模板变量
 
@@ -217,6 +243,8 @@ pipeline.json → executePipelineRun() → Semaphore 池
 | `{iter}` | 当前迭代序号 |
 | `{iterPrev}` | 上一迭代序号 |
 | `{lastOutput}` | 上一阶段 Agent 输出文本 |
+| `{lastPhaseSummary.verdict}` | 上一阶段结构化摘要：PASS/FAIL/UNCLEAR |
+| `{lastPhaseSummary.keyFindings}` | 上一阶段关键发现（换行分隔） |
 | `{outputDir}` | 输出目录完整路径 |
 | `{output}` | 上一阶段日志路径（`{outputDir}/.agent-{phase}.log`） |
 | `{output:phaseName}` | 指定阶段日志路径 |
@@ -225,20 +253,20 @@ pipeline.json → executePipelineRun() → Semaphore 池
 
 ## Agent 发现
 
-3 层优先级（高到低）：
+3 层优先级（低到高，后者覆盖同名 Agent）：
 
-1. **Skill 级** — `{skill_dir}/agents/*.md`（最高优先级）
-2. **项目级** — `.pi/agents/*.md`
-3. **用户级** — `~/.pi/agent/agents/*.md`
+1. **用户级** — `$PI_CODING_AGENT_DIR/agents/*.md`、`~/.omp/agent/agents/*.md`、`~/.pi/agent/agents/*.md`
+2. **项目级** — `.omp/agents/*.md`、`.pi/agents/*.md`
+3. **Skill 级** — `{skill_dir}/agents/*.md`（最高优先级）
 
-Agent `.md` 格式：
+同一层内 `.omp` 路径优先于旧版 `.pi` 路径。Agent `.md` 格式：
 
 ```markdown
 ---
 name: my-agent
 description: 做什么的
 tools: read, write, bash     # 可选
-model: deepseek-v4-pro       # 可选
+model: your-model-id         # 可选
 ---
 
 这里是 system prompt 正文...
@@ -265,22 +293,20 @@ model: deepseek-v4-pro       # 可选
 {outputDir}/.agent-{phase}.trace.jsonl — 完整 JSON trace
 ```
 
-日志格式修复要点：
-- `thinking_delta` 用 `inner.delta`（增量），不用 `partial.content[].thinking`（累积）
-- `toolcall_start` 标记为 `📎 [toolName] fileName`
+`/pipeline logs <id> --entity <e> --phase <p> --tail <n>` 直接查看。
 
 ## 状态持久化
 
-通过 `pi.appendEntry("pipeline-state", record)` 持久化，会话重启自动恢复。`findIncompleteByName()` 检测未完成流水线并断点续跑。
+通过 `pi.appendEntry("pipeline-state", record)` 持久化，会话重启自动恢复。`findIncompleteByName()` 检测未完成流水线并断点续跑；配置了 `pi.memory` 时还会在 `memory://` 中保存兜底状态与等待中的 LLM 决策。
 
 ## 执行流程
 
 ```
 /pipeline run <name> --vars ...
   │
-  ├─ 加载 .pi/pipelines/<name>.json
+  ├─ 加载 .omp/pipelines/<name>.json（回退 .pi/pipelines）
   ├─ 发现实体（entityDiscovery.pattern + exclude）
-  ├─ 发现 Agent（user → project → skill）
+  ├─ 发现 Agent（user → project → skill，后者覆盖）
   ├─ 注入默认变量
   ├─ 检查未完成流水线 → 续跑
   │
@@ -291,36 +317,34 @@ model: deepseek-v4-pro       # 可选
             phaseLoop: while true
               ├─ skipIf 检查
               ├─ 无 Agent → 直接路由
-              ├─ 有 Agent → spawn("pi", ...)
-              │    ├─ 流式日志 + trace
-              │    ├─ 保存 lastOutput / phaseOutputs
+              ├─ 有 Agent → createAgentSession() 进程内执行
+              │    ├─ 渲染 taskTemplate
+              │    ├─ 流式日志 + trace + yield 摘要
               │    └─ versionOutputs
               ├─ 失败 → retry (maxRetries)
               ├─ validate bash 命令
               └─ resolveRoute → 下一阶段 / __LLM__ / done
 ```
 
-## 使用示例
+## 安全
 
-```bash
-# 多实体并行
-/pipeline run my-pipeline --vars work_dir=/data,tool_dir=/opt
+- 流水线定义中的 `validate`、`skipIf.bash`、`hooks` 会以当前用户权限执行 bash
+- Agent 以 pi/omp 的工具权限（read/write/bash 等）运行
+- 插件与普通扩展一样在进程内运行，可访问会话数据与文件系统
 
-# 单实体
-/pipeline run my-pipeline --entity "task-01" --vars work_dir=/data
-```
+只运行你信任的流水线与 Agent 定义。漏洞报告方式见 [SECURITY.md](../../SECURITY.md)。
 
 ## 文件结构
 
 ```
 pipeline-orchestrator/
 ├── index.ts          # 入口：注册命令、工具、executePipelineRun 主循环
-├── pipeline.ts       # 执行引擎：spawn 子 pi 进程、流式日志、validate
+├── pipeline.ts       # 执行引擎：createAgentSession、流式日志、validate、hooks
 ├── state.ts          # 状态引擎：持久化、路由解析、skipIf、模板渲染
 ├── agents.ts         # Agent 发现：解析 .md frontmatter、3 层优先级
 ├── types.ts          # 类型定义：PipelineDefinition、PhaseDefinition 等
-├── pi-types.d.ts     # pi 运行时类型桩（开发用，运行时 pi 注入）
-├── package.json      # 插件元数据
+├── pi-types.d.ts     # pi/omp 运行时类型桩（开发用，运行时注入真实实现）
+├── package.json      # 插件元数据（omp.extensions + 旧版 pi.extensions）
 ├── .gitignore
 └── README.md
 ```

@@ -1,6 +1,8 @@
 # Pipeline Orchestrator — 可观测性驱动的进化设计
 
 > 基于 [Agentic Harness Engineering: Observability-Driven Automatic Evolution of Coding-Agent Harnesses](https://arxiv.org/abs/2604.25850v4)（Lin et al., 2026），对 pipeline-orchestrator 插件和 pipeline-setup skill 的改进设计。
+>
+> **状态：** 设计提案。部分条目已在 v2 引擎中实现，未实现的部分仍是设计稿——以 §9 的实现状态表为准。
 
 ---
 
@@ -634,21 +636,21 @@ write .pi/pipelines/{name}.memory.json    # { "lessons": [] }
 
 ---
 
-## 9. TODO
+## 9. 实现状态
 
-### ✅ 已完成
+以当前 `plugins/pipeline-orchestrator/` 代码为准（2026-10）：
 
-### 🔲 待实施
+| # | 条目 | 状态 | 位置 / 说明 |
+|---|------|------|------|
+| 1 | `lifecycle` 字段 + manifest/memory 初始化 | 🔲 提案 | 尚未实现 |
+| 2 | PhaseSummary 类型 + 生成 | ✅ 已实现 | `types.ts` `PhaseSummary`、`EntityState.phaseSummaries`；`index.ts` 在阶段输出后生成（优先消费 yield 数据） |
+| 3 | `{lastPhaseSummary}` 模板变量 | ✅ 已实现 | `state.ts` `renderTaskTemplate` |
+| 4 | `maxIterationsPerLoop` + `loopId` | ✅ 已实现 | `types.ts`、`index.ts`、`state.ts` |
+| 5 | `loopCounters` 按 loopId 独立计数 | ✅ 已实现 | `types.ts` `EntityState.loopCounters`，`index.ts` 计数与上限检查 |
+| 6 | PhaseHooks before/after | ✅ 已实现 | `types.ts` `PhaseDefinition.hooks`，`pipeline.ts` `executePhase` |
+| 7 | ChangeManifest 类型 + load/save | 🔲 提案 | 尚未实现 |
+| 8 | Memory 类型 + load/save（跨运行经验） | 🔲 提案 | 尚未实现（运行时状态目前走 session entries + `pi.memory` 兜底） |
+| 9 | entityDependencies 依赖图 | ✅ 已实现 | `types.ts`、`index.ts` `processEntity` 依赖检查 |
+| 10 | pipeline-setup 交互式预览 + 推断 | ✅ 已实现（不含 lifecycle 分支） | `SKILL.md` Step 4 预览、loopId/依赖推断；lifecycle/iterative 初始化未实现 |
+| 11 | `/pipeline status` 增强（阶段成功率 + loopCounters） | ✅ 已实现 | `state.ts` `summarizePipeline` |
 
-- [x] **1. `lifecycle` 字段** — types.ts 新增 `lifecycle?: "oneshot" | "iterative"`，index.ts `autoLoadDefinitions` 按 lifecycle 条件加载 manifest/memory
-- [x] **2. PhaseSummary 类型 + 生成** — types.ts 新增 `PhaseSummary` 接口和 `EntityState.phaseSummaries`，index.ts `processEntity` 中 agent 输出后调用 `buildPhaseSummary`
-- [x] **3. `{lastPhaseSummary}` 模板变量** — state.ts `renderTaskTemplate` 新增 `{lastPhaseSummary.verdict}` 和 `{lastPhaseSummary.keyFindings}`
-- [x] **4. `maxIterationsPerLoop` + `loopId`** — types.ts 新增 `maxIterationsPerLoop?: Record<string, number>` 和 `Route.loopId?: string`
-- [x] **5. `loopCounters` 替代 `iter`** — types.ts `EntityState.loopCounters: Record<string, number>`，index.ts 替换现有 `entity.iter` 逻辑为按 loopId 独立计数
-- [x] **6. PhaseHooks before/after** — types.ts `PhaseHooks` 接口 + `PhaseDefinition.hooks`，pipeline.ts `executePhase` 前后执行 hooks
-- [x] **7. ChangeManifest 类型 + load/save** — types.ts 新增 `ChangeManifest`/`ChangeRound`/`ChangeEntry`，state.ts 新增 `loadManifest`/`saveManifest`
-- [x] **8. Memory 类型 + load/save** — types.ts 新增 `MemoryStore`/`Lesson`，state.ts 新增 `loadMemory`/`saveMemory`
-- [x] **9. entityDependencies** — types.ts `PipelineDefinition.entityDependencies`，index.ts `processEntity` 开始处依赖检查
-- [x] **10. pipeline-setup 交互式预览** — pipeline-setup SKILL.md 新增 lifecycle 决策、预览流程、iterative 初始化
-- [x] **11. `/pipeline status` 增强** — index.ts status handler 输出阶段级成功率和 loopCounters
-- [x] **12. 同步到运行时** — rsync 插件到 `~/.pi/agent/extensions/pipeline-orchestrator/`，pipeline-setup 到 `~/.pi/agent/skills/pipeline-setup/`

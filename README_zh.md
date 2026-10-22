@@ -1,89 +1,64 @@
-# Pipeline Orchestrator for pi
+# Pipeline Orchestrator
 
-**声明式多 Agent 流水线编排引擎** — JSON 定义多阶段状态机，自动调度子 Agent 并行执行，支持重试、LLM 决策点、断点续跑。
+**面向 pi 编码智能体生态的声明式多 Agent 流水线引擎。** 用 JSON 状态机描述多阶段工作流——引擎自动发现实体、并行调度子 Agent、失败重试、在 LLM 决策点暂停，并在重启后断点续跑。
 
-```bash
-/pipeline run my-pipeline --vars work_dir=/data,tool_dir=/opt
-```
+[![CI](https://github.com/varsian/pi-pipeline-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/varsian/pi-pipeline-orchestrator/actions/workflows/ci.yml)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](CHANGELOG.md)
+[![Node](https://img.shields.io/badge/node-%3E%3D22-339933?logo=node.js&logoColor=white)](package.json)
+[![Runs on omp](https://img.shields.io/badge/runs%20on-omp%20%28oh--my--pi%29-5B8DEF)](https://github.com/can1357/oh-my-pi)
 
-> This is the Chinese documentation. For English, see [README.md](README.md).
+> [English](README.md)
 
----
+**运行时说明：** 引擎面向 [omp](https://github.com/can1357/oh-my-pi)（`@oh-my-pi/pi-coding-agent`，[Pi](https://github.com/badlogic/pi-mono) 的活跃分支），通过其 Agent SDK 在进程内运行子 Agent。插件仍兼容旧版 `pi.extensions` 清单和 `.pi/` 配置路径；在原生 Pi 上使用需要替换 SDK 导入（见[插件 README](plugins/pipeline-orchestrator/README.md#runtime-and-compatibility)）。
 
-## 为什么你需要这个
-
-当任务从"让 AI 帮我改一个文件"升级到"让 AI 帮我处理 50 个模块，每个模块要生成、审查、分类三轮"，单次对话就不够用了。你需要**编排**。
-
-Pipeline-Orchestrator 把编排逻辑从你的 prompt 里拿出来，放进一个**可审计、可版本控制、可复用的 JSON 定义**，然后由插件引擎自动调度子 Agent 执行。
+**状态：** v2.0.0，早期阶段。流水线定义是可执行的配置——它可以执行 `bash` 校验命令和 hooks——因此只运行你信任的流水线。详见 [SECURITY.md](SECURITY.md)。
 
 ---
 
-## 与 Claude Code Dynamic Workflows 的对比
+## 为什么需要它
 
-2026 年 5 月 28 日，Anthropic 发布了 [Claude Code Dynamic Workflows](https://code.claude.com/docs/en/workflows)——一个让 Claude 写 JavaScript 脚本来自动编排数百个子 Agent 的功能。
+单次对话适合"帮我改一个文件"。但当任务变成"处理 50 个输入，每个都要生成 → 审查 → 分类三轮，中途还要人工裁决，崩溃后要能续跑，并且事后能查清发生了什么"，单次对话就不够用了。
 
-Pipeline-Orchestrator 在此之前已独立完成了相同问题空间的架构设计。两者目标一致：**把多 Agent 编排计划从模型的上下文窗口移到可执行代码中**。但路线不同：
-
-| | Claude Dynamic Workflows | Pipeline-Orchestrator |
-|:--|:--|:--|
-| **编排定义** | 自然语言 → 模型实时生成 JS 脚本 | SKILL.md → 自动生成 JSON → 人工确认 |
-| **可审计性** | 黑盒 JS（需额外步骤查看） | 完全透明的 JSON，在 Git 中版本控制 |
-| **决策方式** | 脚本全自动运行，无中途干预 | Route Table 条件匹配 + `__LLM__` 暂停等人类决策 |
-| **质量保证** | 对抗性验证（Agent 互相否定发现） | 多重重试 + bash validate + 人工审查点 |
-| **供应商绑定** | 深度绑定 Claude 模型和 Claude Code 平台 | 不绑定——pi 生态内使用任意 LLM |
-| **成本** | Opus 4.8 500-Agent 运行可能 10x 账单 | 可用本地模型，成本完全可控 |
-
-**核心差异**：Claude 的路线是"说一句话，模型写脚本，全自动跑到底"——灵活但不可控。Pipeline-Orchestrator 的路线是"写结构化描述，自动生成配置，人在关键点介入"——多一步配置但完全透明。前者适合一次性探索任务，后者适合重复性规范化流水线。
-
-> 详细对比见 [_research/claude-dynamic-workflow/report.md](_research/claude-dynamic-workflow/report.md)
-
----
-
-## 架构
-
-```
-pipeline.json → executePipelineRun() → Semaphore 并发池
-                     │
-                     ├─ entity 自动发现
-                     ├─ Agent 三层发现（skill → 项目 → 用户）
-                     ├─ 模板变量替换
-                     └─ Route Table 路由
-                             │
-                             ├─ entity₁ → phaseLoop
-                             ├─ entity₂ → phaseLoop
-                             └─ entity₃ → phaseLoop
-                                     │
-                                     ├─ spawn("pi", ...)  子进程执行
-                                     ├─ 流式日志 + JSON trace
-                                     ├─ validate bash 校验
-                                     ├─ __LLM__ 暂停等人工决策
-                                     └─ 状态持久化（断点续跑）
-```
+Pipeline Orchestrator 把编排逻辑从 prompt 里搬到**受版本控制的 JSON 状态机**：工作流可以评审、可以 diff，引擎负责调度子 Agent。
 
 ---
 
 ## 快速开始
 
-### 1. 安装
+### 1. 安装插件
 
 ```bash
 git clone https://github.com/varsian/pi-pipeline-orchestrator
 cd pi-pipeline-orchestrator
+
+# omp（默认）：安装为用户级扩展
+mkdir -p ~/.omp/agent/extensions
+cp -r plugins/pipeline-orchestrator ~/.omp/agent/extensions/pipeline-orchestrator
+```
+
+<details>
+<summary>旧版 Pi 路径</summary>
+
+```bash
 cp -r plugins/pipeline-orchestrator ~/.pi/agent/extensions/pipeline-orchestrator
 ```
 
-### 2. 配置流水线
+插件清单同时声明了 `omp.extensions` 和 `pi.extensions`；`.pi/pipelines` 和 `.pi/agents` 仍作为旧版路径回退读取。
+</details>
 
-使用 [pipeline-setup](skills/pipeline-setup/SKILL.md) skill 从任意兼容 skill 的 SKILL.md 自动生成流水线定义：
+### 2. 定义流水线
+
+最快的方式是用 [pipeline-setup](skills/pipeline-setup/SKILL.md) skill，把兼容的 `SKILL.md` 转成流水线 JSON 并安装 Agent：
 
 ```
 /skill:pipeline-setup
 配置 card-generator 的流水线
 ```
 
-或手动编写 `.pi/pipelines/my-pipeline.json`：
+也可以手写 `.omp/pipelines/my-pipeline.json`：
 
-```jsonc
+```json
 {
   "name": "my-pipeline",
   "entityType": "topics",
@@ -91,14 +66,15 @@ cp -r plugins/pipeline-orchestrator ~/.pi/agent/extensions/pipeline-orchestrator
   "outputDir": "{work_dir}/outputs/{entity}/",
   "concurrency": 0,
   "maxIterations": 5,
+  "variables": {
+    "work_dir": { "description": "工作目录", "default": "." },
+    "skill_dir": { "description": "Skill 目录", "default": "/path/to/skill" }
+  },
   "phases": [
     {
       "name": "generate",
       "agent": "generator",
-      "taskTemplate": {
-        "template": "为 {entity} 生成内容，参考 {skill_dir}/references/...",
-        "variables": {}
-      },
+      "taskTemplate": { "template": "为 {entity} 生成内容，参考 {skill_dir}/references/", "variables": {} },
       "transition": {
         "routes": [
           { "if": { "exitCode": 0, "validatePassed": true }, "next": "review" },
@@ -109,10 +85,7 @@ cp -r plugins/pipeline-orchestrator ~/.pi/agent/extensions/pipeline-orchestrator
     {
       "name": "review",
       "agent": "reviewer",
-      "taskTemplate": {
-        "template": "审查 {entity} 的输出：{outputDir}/result.txt",
-        "variables": {}
-      },
+      "taskTemplate": { "template": "审查 {entity} 的输出：{outputDir}/result.txt", "variables": {} },
       "transition": {
         "routes": [
           { "if": { "outputContains": "VERDICT: PASS" }, "next": "done" },
@@ -122,30 +95,42 @@ cp -r plugins/pipeline-orchestrator ~/.pi/agent/extensions/pipeline-orchestrator
       },
       "maxRetries": 3
     }
-  ],
-  "variables": {
-    "work_dir": { "description": "工作目录", "default": "." },
-    "skill_dir": { "description": "Skill 目录", "default": "/path/to/skill" }
-  }
+  ]
 }
+```
+
+Agent 是带 YAML frontmatter 的 Markdown 文件。三层发现，优先级由低到高：
+
+```markdown
+---
+name: generator
+description: 为每个实体生成一份交付物
+tools: read, write, bash
+---
+
+你是生成器。产出要求的文件，最后输出 `VERDICT: PASS`。
+```
+
+```
+.omp/agents/*.md          # 项目级
+~/.omp/agent/agents/*.md  # 用户级
+{skill_dir}/agents/*.md   # Skill 级（最高）
 ```
 
 ### 3. 运行
 
 ```bash
-# 多实体并行
 /pipeline run my-pipeline --vars work_dir=/data,skill_dir=/path/to/skill
-
-# 单实体
-/pipeline run my-pipeline --entity "task-01"
-
-# 查看状态
-/pipeline status
-
-# 暂停/取消
-/pipeline stop <pipelineId>
-/pipeline cancel <pipelineId>
+/pipeline run my-pipeline --entity "task-01"     # 单实体
+/pipeline status                                 # 所有运行的状态
+/pipeline validate my-pipeline                   # 校验配置与 Agent
+/pipeline graph my-pipeline                      # 输出 Mermaid 流程图
+/pipeline logs <pipelineId> --entity task-01     # 查看阶段日志
+/pipeline stop <pipelineId>                      # 暂停（可续跑）
+/pipeline cancel <pipelineId>                    # 取消
 ```
+
+`__LLM__` 会暂停该实体，把提示注入当前会话；你查看产物后用 `pipeline_decide` 工具恢复执行——释放的并发槽位让其他实体继续跑。
 
 ---
 
@@ -153,53 +138,88 @@ cp -r plugins/pipeline-orchestrator ~/.pi/agent/extensions/pipeline-orchestrator
 
 | 特性 | 说明 |
 |:--|:--|
-| **声明式 JSON 定义** | 版本控制、可审计、可复用 |
-| **Route Table 路由** | 10+ 种条件类型（exitCode、outputContains、outputRegex、fileExists 等） |
-| **并行执行** | `concurrency` 控制并发数，信号量管理 |
-| **LLM 决策点** | `__LLM__` 暂停等 `pipeline_decide()`，释放槽位不阻塞其他实体 |
-| **断点续跑** | 状态持久化到会话条目，会话重启自动恢复 |
-| **Agent 自动发现** | 3 层优先级：Skill → 项目 → 用户 |
-| **模板变量** | `{entity}` `{iter}` `{lastOutput}` `{outputDir}` 等 |
-| **阶段跳过** | `skipIf` 支持 bash/fileExists/fileNotExists |
-| **输出版本化** | `versionOutputs` 自动加迭代前缀 |
-| **实体依赖** | `entityDependencies` 声明执行顺序 |
-| **阶段钩子** | `hooks.before/after` Agent spawn 前后 bash 命令 |
-| **双日志** | 人类可读日志 + JSON trace，支持 `tail -f` |
+| **声明式 JSON** | 状态机入库，像代码一样评审 |
+| **Route Table** | 10+ 种 AND 组合条件：`exitCode`、`validatePassed`、`outputContains`、`outputRegex`（+ `captureOp` 数值比较）、`fileExists`、`fileMinSize`、`fileMaxSize`、`bash`、兜底 `true` |
+| **实体并行** | `concurrency: N` 控制同时在跑的实体数，`0` = 不限制 |
+| **LLM 决策点** | `__LLM__` 等待 `pipeline_decide` 期间释放并发槽位 |
+| **断点续跑** | 状态持久化到会话条目（含 `memory` 回退）；未完成运行在重启后恢复 |
+| **Agent 自动发现** | Skill → 项目 → 用户；`.omp` 优先于旧版 `.pi`；支持 `$PI_CODING_AGENT_DIR` |
+| **模板变量** | `{entity}`、`{iter}`、`{outputDir}`、`{lastOutput}`、`{lastPhaseSummary.verdict}`、`{lastPhaseSummary.keyFindings}` 以及 `--vars` 自定义变量 |
+| **结构化输出** | 子 Agent 被要求调用 `yield` 返回 `{verdict, summary, keyFindings}`；摘要按阶段保存，可注入后续 prompt |
+| **条件跳过** | `skipIf` 支持 `bash`、`fileExists`、`fileNotExists` |
+| **输出版本化** | `versionOutputs` 自动给产物加迭代序号前缀 |
+| **实体依赖** | `entityDependencies` 声明执行顺序（fan-out / join） |
+| **阶段钩子** | `hooks.before` / `hooks.after` 在 Agent 调用前后执行 bash |
+| **双日志** | 人类可读 `.log` + 机器可读 `.trace.jsonl`，支持 `tail -f` |
+
+完整 schema、路由条件参考和决策模式说明见[插件 README](plugins/pipeline-orchestrator/README.md)。
 
 ---
 
-## 文件结构
+## 架构
 
 ```
-pipeline-orchestrator/
-├── index.ts          # 入口：注册命令/工具，主执行循环，并发控制
-├── pipeline.ts       # 执行引擎：spawn 子 pi 进程，流式日志，validate
-├── state.ts          # 状态引擎：持久化、路由解析、skipIf、模板渲染
-├── agents.ts         # Agent 发现：解析 .md frontmatter，3 层优先级
-├── types.ts          # 类型定义
-├── pi-types.d.ts     # pi 运行时类型桩
-├── package.json
-└── README.md
+pipeline.json ──▶ executePipelineRun() ──▶ 信号量（concurrency）
+                      │
+                      ├─ 实体自动发现（pattern + exclude）
+                      ├─ Agent 发现（skill → project → user）
+                      ├─ 模板变量渲染
+                      └─ Route Table（条件匹配）
+                              │
+        entity₁ ──▶ phaseLoop   entity₂ ──▶ phaseLoop   entity₃ ──▶ phaseLoop
+                              │
+                              ├─ createAgentSession() —— 进程内子 Agent
+                              ├─ 流式日志 + JSON trace
+                              ├─ validate（bash，exit 0 = 通过）
+                              ├─ __LLM__ 暂停 ──▶ pipeline_decide()
+                              ├─ yield ──▶ PhaseSummary（verdict + findings）
+                              └─ 状态持久化 ──▶ 断点续跑
+```
+
+子 Agent 通过 omp 的 `createAgentSession` SDK 在进程内运行；v1 引擎会 spawn `pi` CLI 子进程并解析其 JSON 流，进程内方案去掉了这层解析，并可直接消费结构化事件（`tool_execution_*`、`message_update`、`yield`）。
+
+---
+
+## 仓库结构
+
+```
+pi-pipeline-orchestrator/
+├── plugins/pipeline-orchestrator/   # 插件：引擎、路由、状态、Agent 发现
+├── skills/pipeline-setup/           # 生成流水线并安装 Agent 的 SKILL.md
+├── docs/                            # 进化设计笔记与发布说明
+├── scripts/check-repo.mjs           # 离线一致性/链接/密钥检查（CI）
+├── SECURITY.md
+├── CHANGELOG.md
+├── tsconfig.json
+└── package.json
 ```
 
 ---
 
-## 配套工具
+## 相关工作：Claude Code Dynamic Workflows
 
-| 工具 | 说明 |
-|:--|:--|
-| [pipeline-setup](skills/pipeline-setup/SKILL.md) | 从 SKILL.md 自动生成 pipeline JSON 和安装 agent |
-| pipeline-orchestrator 插件 | 运行时引擎（本项目） |
+Anthropic 的 Claude Code 提供 [dynamic workflows](https://code.claude.com/docs/en/workflows) 功能，允许模型编写 JavaScript 编排大量子 Agent——方向相同：**把多 Agent 编排从上下文窗口移到可执行结构里**。两者取舍不同：
+
+| | Claude Code Dynamic Workflows | Pipeline Orchestrator |
+|:--|:--|:--|
+| **定义方式** | 自然语言 → 模型实时生成 JS | SKILL.md → 生成 JSON → 人工确认 |
+| **可审计性** | 生成脚本，需额外步骤查看 | 纯 JSON 入 Git，逐次改动可 diff |
+| **决策方式** | 全自动跑完，无中途干预 | Route Table + `__LLM__` 暂停等人工/LLM 裁决 |
+| **质量保证** | Agent 互相验证 | 重试 + `validate` bash 校验 + 审查阶段 |
+| **可移植性** | 绑定 Claude Code 与 Anthropic 模型 | 供应商中立：pi/omp 生态内任意模型 |
+| **成本控制** | 开销随 fan-out 增长 | 可用本地模型；`concurrency` 限制 fan-out |
+
+两者并非互相替代：生成脚本适合一次性探索；声明式状态机更适合可评审、可重跑、可标准化的流水线。
 
 ---
 
 ## 遇到问题？
 
-这个项目的代码量不大（8 个源文件），结构清晰。如果你在使用中遇到问题：
+代码量约 2,900 行 TypeScript、六个文件，结构清晰。遇到问题时：
 
-1. **让你的 AI 助手帮你**——把报错信息和相关源文件（`index.ts`、`pipeline.ts`、`state.ts` 等）发给你的 AI 编程助手，让它读代码定位问题。大部分情况下它能直接给出修改方案。
-2. **提 Issue**——欢迎到 [GitHub Issues](https://github.com/varsian/pi-pipeline-orchestrator/issues) 报告 bug 或提功能建议。
-3. **提 PR**——如果你修复了某个问题或添加了新功能，欢迎提交 Pull Request。
+1. **让你的 AI 助手帮你**——把报错信息和相关文件（`index.ts`、`pipeline.ts`、`state.ts`、`agents.ts`）发给它。
+2. **提 Issue**——bug 与功能建议请到 [GitHub Issues](https://github.com/varsian/pi-pipeline-orchestrator/issues)；安全问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要公开提 Issue。
+3. **提 PR**——改了插件行为请同步插件 README；`node scripts/check-repo.mjs` 与 `npx tsc --noEmit` 必须通过。
 
 ---
 

@@ -7,6 +7,8 @@ description: Read existing skill definitions (agents, pipeline structure) and au
 
 读取任意 pipeline-compatible skill，自动提取 agent 和流水线结构，安装到项目下供 pipeline-orchestrator 插件使用。
 
+> 运行时约定：默认按 **omp** 布局写入 `.omp/agents/`、`.omp/pipelines/`；旧版 Pi 项目可改用 `.pi/...`（插件同时读取两种路径，`.omp` 优先）。
+
 ## Skill 发现
 
 用户说"配置 XXX 的流水线"时，按顺序查找 skill：
@@ -20,8 +22,8 @@ description: Read existing skill definitions (agents, pipeline structure) and au
 
 ## 做什么
 
-1. 安装 `{skill}/agents/*.md` → `.pi/agents/`（也写入 `.omp/agents/` 如果存在）
-2. 解析 `{skill}/SKILL.md` 的流水线描述 → `.pi/pipelines/{name}.json`
+1. 安装 `{skill}/agents/*.md` → `.omp/agents/`（旧版项目用 `.pi/agents/`）
+2. 解析 `{skill}/SKILL.md` 的流水线描述 → `.omp/pipelines/{name}.json`（旧版项目用 `.pi/pipelines/`）
 3. **交互式预览**：生成后不直接写入，先展示关键决策让用户确认或调整
 4. **验证**：保存后用 `/pipeline validate {name}` 检验配置正确性
 5. 输出配置摘要
@@ -60,7 +62,7 @@ description: Read existing skill definitions (agents, pipeline structure) and au
 ## Step 2: 安装 agent
 
 ```bash
-cp {skill}/agents/*.md .pi/agents/
+cp {skill}/agents/*.md .omp/agents/
 ```
 
 已存在同名文件时 diff 对比，提示覆盖。
@@ -94,7 +96,7 @@ cp {skill}/agents/*.md .pi/agents/
 ### ⚠️ 占位符翻译（必须在保存前执行）
 
 route 示例中使用的 `__NEXT__`、`__SELF__`、`__LLM__` 是**写作占位符**，
-保存到 `.pi/pipelines/{name}.json` **之前必须翻译**：
+保存到 `.omp/pipelines/{name}.json` **之前必须翻译**：
 
 | 占位符 | 翻译规则 | 示例 |
 |:--|:--|:--|
@@ -150,7 +152,7 @@ entityDiscovery 的作用是**发现实体列表**（扫描目录找子目录/�
 {
   "variables": {
     "study_dir": { "description": "...", "default": "" },
-    "skill_dir": { "description": "...", "default": "/home/user/.pi/agent/skills/my-skill/" }
+    "skill_dir": { "description": "...", "default": "/absolute/path/.omp/agent/skills/my-skill/" }
   }
 }
 ```
@@ -321,7 +323,7 @@ Agent prompt 中 "输出到 XXX.md" → `versionOutputs: ["XXX.md"]`
 
 ```bash
 # 写入项目
-write .pi/pipelines/{name}.json
+write .omp/pipelines/{name}.json   # 旧版 Pi 项目：.pi/pipelines/{name}.json
 
 # 关键：skill_dir 填绝对路径
 variables.skill_dir = {skill 目录的绝对路径}
@@ -427,13 +429,13 @@ FINDINGS:
 
 ```
 输入: "配置 my-skill 的流水线"
-发现: ~/.pi/agent/skills/my-skill/
+发现: ~/.omp/agent/skills/my-skill/
 Agents: 3 个 (generator, reviewer, classifier)
 SKILL.md: 4 阶段，2 个模型判断循环，1 个 LLM 裁决
 
 输出:
-  ✓ 3 agents → .pi/agents/
-  ✓ pipeline → .pi/pipelines/my-skill.json
+  ✓ 3 agents → .omp/agents/
+  ✓ pipeline → .omp/pipelines/my-skill.json
     阶段: pending → generated ⇄ reviewed ⇄ classified → done
     skipIf: 输出目录无输入文件时跳过
     maxIterations: 5
